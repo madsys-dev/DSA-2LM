@@ -2,6 +2,9 @@
 #ifndef _LINUX_HIGHMEM_H
 #define _LINUX_HIGHMEM_H
 
+#include "linux/compiler.h"
+#include "linux/ktime.h"
+#include "linux/timekeeping.h"
 #include <linux/fs.h>
 #include <linux/kernel.h>
 #include <linux/bug.h>
@@ -10,6 +13,7 @@
 #include <linux/hardirq.h>
 
 #include <asm/cacheflush.h>
+#include "../../linux/drivers/misc/experiment/exp.h"
 
 #include "highmem-internal.h"
 
@@ -233,16 +237,19 @@ static inline void zero_user(struct page *page,
 
 #ifndef __HAVE_ARCH_COPY_USER_HIGHPAGE
 
+static inline void copy_highpage(struct page *to, struct page *from);
+
 static inline void copy_user_highpage(struct page *to, struct page *from,
 	unsigned long vaddr, struct vm_area_struct *vma)
 {
-	char *vfrom, *vto;
+	// char *vfrom, *vto;
 
-	vfrom = kmap_atomic(from);
-	vto = kmap_atomic(to);
-	copy_user_page(vto, vfrom, vaddr, to);
-	kunmap_atomic(vto);
-	kunmap_atomic(vfrom);
+	// vfrom = kmap_atomic(from);
+	// vto = kmap_atomic(to);
+	// copy_user_page(vto, vfrom, vaddr, to);
+	// kunmap_atomic(vto);
+	// kunmap_atomic(vfrom);
+	copy_highpage(to, from);
 }
 
 #endif
@@ -252,12 +259,29 @@ static inline void copy_user_highpage(struct page *to, struct page *from,
 static inline void copy_highpage(struct page *to, struct page *from)
 {
 	char *vfrom, *vto;
+	ktime_t start, end;
 
-	vfrom = kmap_atomic(from);
-	vto = kmap_atomic(to);
-	copy_page(vto, vfrom);
-	kunmap_atomic(vto);
-	kunmap_atomic(vfrom);
+	if (unlikely(timer_state == TIMER_ON)) {
+		vfrom = kmap_atomic(from);
+		vto = kmap_atomic(to);
+		start = ktime_get();
+		copy_page(vto, vfrom);
+		end = ktime_get();
+		kunmap_atomic(vto);
+		kunmap_atomic(vfrom);
+
+		last_time = ktime_sub(end, start);
+		spin_lock(&timer_lock);
+		total_time = ktime_add(total_time, last_time);
+		++copy_cnt;
+		spin_unlock(&timer_lock);
+	} else {
+		vfrom = kmap_atomic(from);
+		vto = kmap_atomic(to);
+		copy_page(vto, vfrom);
+		kunmap_atomic(vto);
+		kunmap_atomic(vfrom);
+	}
 }
 
 #endif
