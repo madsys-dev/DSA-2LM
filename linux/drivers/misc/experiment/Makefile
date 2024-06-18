@@ -1,2 +1,3 @@
 # SPDX-License-Identifier: GPL-2.0-only
-obj-y += init.o
+ccflags-y += -std=gnu99
+obj-y += exp.o
