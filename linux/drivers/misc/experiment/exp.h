@@ -8,7 +8,7 @@
 
 extern volatile ktime_t total_time, last_time;
 extern volatile unsigned long copy_cnt, dsa_copy_cnt;
-extern atomic_long_t dsa_copy_fail;
+extern atomic_long_t dsa_copy_fail, huge_page_cnt, base_page_cnt;
 extern volatile int timer_state, dsa_state;
 extern spinlock_t timer_lock, dsa_lock;
 extern volatile unsigned long copy_dir_cnt[];

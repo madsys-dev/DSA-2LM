@@ -799,6 +799,7 @@ void copy_huge_page(struct page *dst, struct page *src) {
 		++copy_dir_cnt[(src_nid << 1) | dst_nid];
 		dsa_copy_cnt += READ_ONCE(dsa_state) == DSA_ON;
 		spin_unlock_irqrestore(&timer_lock, flags);
+		atomic_long_inc(&huge_page_cnt);
 	} else {
 		copy_huge_page_extra(dst, src, nr_pages);
 	}

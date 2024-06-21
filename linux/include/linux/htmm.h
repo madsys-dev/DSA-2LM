@@ -2,9 +2,9 @@
 
 #define DEFERRED_SPLIT_ISOLATED 1
 
-#define BUFFER_SIZE	32 /* 128: 1MB */
-#define CPUS_PER_SOCKET 20
-#define MAX_MIGRATION_RATE_IN_MBPS  2048 /* 2048MB per sec */
+#define BUFFER_SIZE	1024 /* 128: 1MB */
+#define CPUS_PER_SOCKET 96
+#define MAX_MIGRATION_RATE_IN_MBPS  40960 /* 2048MB per sec */
 
 
 /* pebs events */
@@ -23,9 +23,9 @@
 #define HTMM_HUGEPAGE_OPT_V2	0x3 /* unused */
 
 /**/
-#define DRAM_ACCESS_LATENCY 80
+#define DRAM_ACCESS_LATENCY 112
 #define NVM_ACCESS_LATENCY  270
-#define CXL_ACCESS_LATENCY  170
+#define CXL_ACCESS_LATENCY  192
 #define DELTA_CYCLES	(NVM_ACCESS_LATENCY - DRAM_ACCESS_LATENCY)
 
 #define pcount 30

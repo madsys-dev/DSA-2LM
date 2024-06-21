@@ -30,7 +30,7 @@
 
 volatile ktime_t total_time, last_time;
 volatile unsigned long copy_cnt, dsa_copy_cnt;
-atomic_long_t dsa_copy_fail;
+atomic_long_t dsa_copy_fail, huge_page_cnt, base_page_cnt;
 volatile unsigned long copy_dir_cnt[4];
 volatile int timer_state, dsa_state;
 DEFINE_PER_CPU(struct page*, page_bak); 
@@ -43,6 +43,8 @@ EXPORT_SYMBOL(last_time);
 EXPORT_SYMBOL(copy_cnt);
 EXPORT_SYMBOL(dsa_copy_cnt);
 EXPORT_SYMBOL(dsa_copy_fail);
+EXPORT_SYMBOL(huge_page_cnt);
+EXPORT_SYMBOL(base_page_cnt);
 EXPORT_SYMBOL(timer_state);
 EXPORT_SYMBOL(timer_lock);
 // EXPORT_SYMBOL(dsa_lock);
@@ -51,17 +53,21 @@ EXPORT_SYMBOL(dsa_state);
 EXPORT_SYMBOL(page_bak_addr);
 
 #define MAX_CHAN 8
+#define NUM_AVAIL_DMA_CHAN MAX_CHAN
 static struct dma_chan *channels[MAX_CHAN];
 static struct dma_device *copy_dev[MAX_CHAN] = {0};
 static dma_addr_t dma_src, dma_dst;
 static spinlock_t map_and_prep_lock[MAX_CHAN];
+static int limit_dma_chans = NUM_AVAIL_DMA_CHAN;
 
 static int timer_proc_show(struct seq_file *m, void *v) {
     seq_printf(m, 
         "timer_state = %d dsa_state = %d total_time = %llums last_time = %lluns copy_cnt = %lu dsa_copy_cnt = %lu dsa_copy_fail = %lu "
-        "copy_dir_cnt[0->0] = %lu copy_dir_cnt[0->1] = %lu copy_dir_cnt[1->0] = %lu copy_dir_cnt[1->1] = %lu\n", 
+        "copy_dir_cnt[0->0] = %lu copy_dir_cnt[0->1] = %lu copy_dir_cnt[1->0] = %lu copy_dir_cnt[1->1] = %lu "
+        "huge_page_cnt = %lu base_page_cnt = %lu\n", 
         timer_state, dsa_state, ktime_to_ms(total_time), ktime_to_ns(last_time), copy_cnt, dsa_copy_cnt, atomic_long_read(&dsa_copy_fail),
-        copy_dir_cnt[0], copy_dir_cnt[1], copy_dir_cnt[2], copy_dir_cnt[3]
+        copy_dir_cnt[0], copy_dir_cnt[1], copy_dir_cnt[2], copy_dir_cnt[3],
+        atomic_long_read(&huge_page_cnt), atomic_long_read(&base_page_cnt)
     );
     return 0;
 }
@@ -100,17 +106,19 @@ static int dsa_test_init(void) {
 
 static ssize_t timer_proc_write(struct file *file, const char __user *buffer, size_t len, loff_t *f_pos) {
     unsigned long rc;
-    int val1 = -1, val2 = -1, val3 = -1;
+    int val1 = -1, val2 = -1, val3 = -1, val4 = -1;
     static char kbuf[1024];
 
     rc = copy_from_user(kbuf, buffer, len);
     printk(KERN_INFO "rc: %lu len(buf): %lu buf: %s\n", rc, strlen(kbuf), kbuf);
-    rc = sscanf(kbuf, "%d %d %d", &val1, &val2, &val3);
-    if (rc == 3) {
+    rc = sscanf(kbuf, "%d %d %d %d", &val1, &val2, &val3, &val4);
+    if (rc == 4) {
         if (timer_state == TIMER_OFF && val1 == TIMER_ON) {
             total_time = last_time = ktime_set(0, 0);
             copy_cnt = dsa_copy_cnt = 0;
             atomic_long_set(&dsa_copy_fail, 0);
+            atomic_long_set(&huge_page_cnt, 0);
+            atomic_long_set(&base_page_cnt, 0);
             memset((void*)copy_dir_cnt, 0, sizeof(copy_dir_cnt));
         }
         if (val2 == DSA_ON) {
@@ -131,6 +139,9 @@ static ssize_t timer_proc_write(struct file *file, const char __user *buffer, si
         }
         if (val3 == 0 || val3 == 1) {
             WRITE_ONCE(dsa_state, val3);
+        }
+        if (val4 > 0) {
+            WRITE_ONCE(limit_dma_chans, val4);
         }
     } else {
         printk(KERN_INFO "Error: rc is %lu, fail to parse %s\n", rc, kbuf);
@@ -271,9 +282,6 @@ void dsa_copy(void *to, void *from, size_t size) {
 
 }
 EXPORT_SYMBOL(dsa_copy);
-
-#define NUM_AVAIL_DMA_CHAN MAX_CHAN
-static int limit_dma_chans = NUM_AVAIL_DMA_CHAN;
 
 int dsa_copy_page(struct page *to, struct page *from, int nr_pages) {
 	struct dma_async_tx_descriptor *tx[NUM_AVAIL_DMA_CHAN] = {0};
