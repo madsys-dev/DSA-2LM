@@ -21,6 +21,8 @@
  *  Copyright (C) 2007 Red Hat, Inc., Peter Zijlstra
  */
 #include "sched.h"
+#include <trace/events/sched.h>
+#include <linux/mempolicy.h>
 
 /*
  * Targeted preemption latency for CPU-bound tasks:
@@ -1421,14 +1423,32 @@ static inline unsigned long group_weight(struct task_struct *p, int nid,
 }
 
 bool should_numa_migrate_memory(struct task_struct *p, struct page * page,
-				int src_nid, int dst_cpu)
+				int src_nid, int dst_cpu, int flags)
 {
 	struct numa_group *ng = deref_curr_numa_group(p);
 	int dst_nid = cpu_to_node(dst_cpu);
 	int last_cpupid, this_cpupid;
 
+	count_vm_numa_event(PGPROMOTE_CANDIDATE);
+
+	if (numa_demotion_enabled && (flags & TNF_DEMOTED))
+		count_vm_numa_event(PGPROMOTE_CANDIDATE_DEMOTED);
+
+	if (page_is_file_lru(page))
+		count_vm_numa_event(PGPROMOTE_CANDIDATE_FILE);
+	else
+		count_vm_numa_event(PGPROMOTE_CANDIDATE_ANON);
+
 	this_cpupid = cpu_pid_to_cpupid(dst_cpu, current->pid);
 	last_cpupid = page_cpupid_xchg_last(page, this_cpupid);
+
+	/*
+	 * The pages in non-toptier memory node should be migrated
+	 * according to hot/cold instead of accessing CPU node.
+	 */
+	if (numa_promotion_tiered_enabled && !node_is_toptier(src_nid))
+		return true;
+
 
 	/*
 	 * Allow first faults or private faults to migrate immediately early in
@@ -10742,6 +10762,7 @@ void trigger_load_balance(struct rq *rq)
 		raise_softirq(SCHED_SOFTIRQ);
 
 	nohz_balancer_kick(rq);
+	check_toptier_balanced();
 }
 
 static void rq_online_fair(struct rq *rq)

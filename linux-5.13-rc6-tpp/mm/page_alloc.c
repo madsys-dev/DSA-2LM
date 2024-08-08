@@ -3570,7 +3570,8 @@ out:
 	if (test_bit(ZONE_BOOSTED_WATERMARK, &zone->flags)) {
 		clear_bit(ZONE_BOOSTED_WATERMARK, &zone->flags);
 		wakeup_kswapd(zone, 0, 0, zone_idx(zone));
-	}
+	} else if (!pgdat_toptier_balanced(zone->zone_pgdat, order, zone_idx(zone)))
+		wakeup_kswapd(zone, 0, 0, zone_idx(zone));
 
 	VM_BUG_ON_PAGE(page && bad_range(zone, page), page);
 	return page;
@@ -5973,7 +5974,7 @@ static int node_load[MAX_NUMNODES];
  *
  * Return: node id of the found node or %NUMA_NO_NODE if no node is found.
  */
-static int find_next_best_node(int node, nodemask_t *used_node_mask)
+int find_next_best_node(int node, nodemask_t *used_node_mask)
 {
 	int n, val;
 	int min_val = INT_MAX;
@@ -8132,6 +8133,22 @@ static void __setup_per_zone_wmarks(void)
 		zone->_watermark[WMARK_LOW]  = min_wmark_pages(zone) + tmp;
 		zone->_watermark[WMARK_HIGH] = min_wmark_pages(zone) + tmp * 2;
 
+		if (numa_promotion_tiered_enabled) {
+			tmp = mult_frac(zone_managed_pages(zone), demote_scale_factor, 10000);
+
+			/*
+			 * Clamp demote watermark between twice high watermark
+			 * and max managed pages.
+			 */
+			if (tmp < 2 * zone->_watermark[WMARK_HIGH])
+				tmp = 2 * zone->_watermark[WMARK_HIGH];
+			if (tmp > zone_managed_pages(zone))
+				tmp = zone_managed_pages(zone);
+			zone->_watermark[WMARK_DEMOTE] = tmp;
+
+			zone->watermark_boost = 0;
+		}
+
 		spin_unlock_irqrestore(&zone->lock, flags);
 	}
 
@@ -8235,6 +8252,21 @@ int min_free_kbytes_sysctl_handler(struct ctl_table *table, int write,
 
 int watermark_scale_factor_sysctl_handler(struct ctl_table *table, int write,
 		void *buffer, size_t *length, loff_t *ppos)
+{
+	int rc;
+
+	rc = proc_dointvec_minmax(table, write, buffer, length, ppos);
+	if (rc)
+		return rc;
+
+	if (write)
+		setup_per_zone_wmarks();
+
+	return 0;
+}
+
+int demote_scale_factor_sysctl_handler(struct ctl_table *table, int write,
+	void __user *buffer, size_t *length, loff_t *ppos)
 {
 	int rc;
 
@@ -8668,7 +8700,8 @@ static inline void alloc_contig_dump_pages(struct list_head *page_list)
 
 /* [start, end) must belong to a single zone. */
 static int __alloc_contig_migrate_range(struct compact_control *cc,
-					unsigned long start, unsigned long end)
+					unsigned long start, unsigned long end,
+					unsigned int *nr_succeeded)
 {
 	/* This function is based on compact_zone() from compaction.c. */
 	unsigned int nr_reclaimed;
@@ -8705,7 +8738,8 @@ static int __alloc_contig_migrate_range(struct compact_control *cc,
 		cc->nr_migratepages -= nr_reclaimed;
 
 		ret = migrate_pages(&cc->migratepages, alloc_migration_target,
-				NULL, (unsigned long)&mtc, cc->mode, MR_CONTIG_RANGE);
+				NULL, (unsigned long)&mtc, cc->mode, MR_CONTIG_RANGE,
+				nr_succeeded);
 
 		/*
 		 * On -ENOMEM, migrate_pages() bails out right away. It is pointless
@@ -8751,6 +8785,7 @@ int alloc_contig_range(unsigned long start, unsigned long end,
 	unsigned long outer_start, outer_end;
 	unsigned int order;
 	int ret = 0;
+	unsigned int nr_succeeded = 0;
 
 	struct compact_control cc = {
 		.nr_migratepages = 0,
@@ -8805,7 +8840,7 @@ int alloc_contig_range(unsigned long start, unsigned long end,
 	 * allocated.  So, if we fall through be sure to clear ret so that
 	 * -EBUSY is not accidentally used or returned to caller.
 	 */
-	ret = __alloc_contig_migrate_range(&cc, start, end);
+	ret = __alloc_contig_migrate_range(&cc, start, end, &nr_succeeded);
 	if (ret && ret != -EBUSY)
 		goto done;
 	ret = 0;

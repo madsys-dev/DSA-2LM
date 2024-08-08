@@ -3611,8 +3611,28 @@ static void __sched_fork(unsigned long clone_flags, struct task_struct *p)
 }
 
 DEFINE_STATIC_KEY_FALSE(sched_numa_balancing);
+int sysctl_numa_balancing_mode;
+bool numa_promotion_tiered_enabled;
 
 #ifdef CONFIG_NUMA_BALANCING
+
+/*
+ * If there is only one toptier node available, pages on that
+ * node can not be promotrd to anywhere. In that case, downgrade
+ * to numa_promotion_tiered_enabled mode
+ */
+static void check_numa_promotion_mode(void)
+{
+	int node, toptier_node_count = 0;
+
+	for_each_online_node(node) {
+		if (node_is_toptier(node))
+			++toptier_node_count;
+	}
+	if (toptier_node_count == 1) {
+		numa_promotion_tiered_enabled = true;
+	}
+}
 
 void set_numabalancing_state(bool enabled)
 {
@@ -3626,20 +3646,22 @@ void set_numabalancing_state(bool enabled)
 int sysctl_numa_balancing(struct ctl_table *table, int write,
 			  void *buffer, size_t *lenp, loff_t *ppos)
 {
-	struct ctl_table t;
 	int err;
-	int state = static_branch_likely(&sched_numa_balancing);
 
 	if (write && !capable(CAP_SYS_ADMIN))
 		return -EPERM;
 
-	t = *table;
-	t.data = &state;
-	err = proc_dointvec_minmax(&t, write, buffer, lenp, ppos);
+	err = proc_dointvec_minmax(table, write, buffer, lenp, ppos);
 	if (err < 0)
 		return err;
-	if (write)
-		set_numabalancing_state(state);
+	if (write) {
+		if (sysctl_numa_balancing_mode & NUMA_BALANCING_NORMAL)
+			check_numa_promotion_mode();
+		else if (sysctl_numa_balancing_mode & NUMA_BALANCING_TIERED_MEMORY)
+			numa_promotion_tiered_enabled = true;
+
+		set_numabalancing_state(*(int *)table->data);
+	}
 	return err;
 }
 #endif

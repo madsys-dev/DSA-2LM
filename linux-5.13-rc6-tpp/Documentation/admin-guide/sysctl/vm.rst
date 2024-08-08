@@ -74,6 +74,7 @@ Currently, these files are in /proc/sys/vm:
 - vfs_cache_pressure
 - watermark_boost_factor
 - watermark_scale_factor
+- demote_scale_factor
 - zone_reclaim_mode
 
 
@@ -961,6 +962,17 @@ that the number of free pages kswapd maintains for latency reasons is
 too small for the allocation bursts occurring in the system. This knob
 can then be used to tune kswapd aggressiveness accordingly.
 
+demote_scale_factor
+===================
+
+This factor controls when kswapd wakes up to demote pages from toptier
+nodes. It defines the amount of memory left in a toptier node/system
+before kswapd is woken up and how much memory needs to be free from those
+nodes before kswapd goes back to sleep.
+
+The unit is in fractions of 10,000. The default value of 200 means if there
+are less than 2% of free toptier memory in a node/system, we will start  to
+demote pages from that node.
 
 zone_reclaim_mode
 =================

@@ -52,6 +52,8 @@
 #include <linux/kthread.h>
 #include <linux/membarrier.h>
 #include <linux/migrate.h>
+#include <linux/mempolicy.h>
+#include <linux/mm_inline.h>
 #include <linux/mmu_context.h>
 #include <linux/nmi.h>
 #include <linux/proc_fs.h>

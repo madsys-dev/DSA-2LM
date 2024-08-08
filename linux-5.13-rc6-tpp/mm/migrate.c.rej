@@ -1,0 +1,10 @@
+--- mm/migrate.c
++++ mm/migrate.c
+@@ -2220,6 +2240,7 @@ int migrate_misplaced_page(struct page *page, struct vm_area_struct *vma,
+ 	pg_data_t *pgdat = NODE_DATA(node);
+ 	int isolated;
+ 	int nr_remaining;
++	bool is_file;
+ 	LIST_HEAD(migratepages);
+ 
+ 	/*

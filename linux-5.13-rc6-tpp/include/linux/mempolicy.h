@@ -145,6 +145,7 @@ extern void numa_default_policy(void);
 extern void numa_policy_init(void);
 extern void mpol_rebind_task(struct task_struct *tsk, const nodemask_t *new);
 extern void mpol_rebind_mm(struct mm_struct *mm, nodemask_t *new);
+extern void check_toptier_balanced(void);
 
 extern int huge_node(struct vm_area_struct *vma,
 				unsigned long addr, gfp_t gfp_flags,
@@ -184,8 +185,11 @@ extern void mpol_to_str(char *buffer, int maxlen, struct mempolicy *pol);
 /* Check if a vma is migratable */
 extern bool vma_migratable(struct vm_area_struct *vma);
 
-extern int mpol_misplaced(struct page *, struct vm_area_struct *, unsigned long);
+extern int mpol_misplaced(struct page *, struct vm_area_struct *, unsigned long, int);
 extern void mpol_put_task_policy(struct task_struct *);
+
+extern bool numa_demotion_enabled;
+extern bool numa_promotion_tiered_enabled;
 
 #else
 
@@ -282,7 +286,7 @@ static inline int mpol_parse_str(char *str, struct mempolicy **mpol)
 #endif
 
 static inline int mpol_misplaced(struct page *page, struct vm_area_struct *vma,
-				 unsigned long address)
+				 unsigned long address, int flags)
 {
 	return -1; /* no node preference */
 }
@@ -295,5 +299,12 @@ static inline nodemask_t *policy_nodemask_current(gfp_t gfp)
 {
 	return NULL;
 }
+
+static inline void check_toptier_balanced(void)
+{
+}
+
+#define numa_demotion_enabled	false
+#define numa_promotion_tiered_enabled	false
 #endif /* CONFIG_NUMA */
 #endif

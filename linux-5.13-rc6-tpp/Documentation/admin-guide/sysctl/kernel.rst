@@ -609,6 +609,24 @@ numa_balancing_scan_delay_ms, numa_balancing_scan_period_max_ms,
 numa_balancing_scan_size_mb`_, and numa_balancing_settle_count sysctls.
 
 
+By default, NUMA hinting faults are generate on both toptier and non-toptier
+nodes. However, in a tiered-memory system, hot memories in toptier memory nodes
+may not need to be migrated around. In such cases, it's unnecessary to scan the
+pages in the toptier memory nodes. For a tiered-memory system, unnecessary scannings
+and hinting faults in the toptier nodes are disabled.
+
+This interface takes bits field as input. Supported values and corresponding modes are
+as follow:
+
+- 0x0: NUMA_BALANCING_DISABLED
+- 0x1: NUMA_BALANCING_NORMAL
+- 0x2: NUMA_BALANCING_TIERED_MEMORY
+
+If a system has single toptier node online, then default NUMA balancing will
+automatically be downgraded to the tiered-memory mode to avoid the unnecessary scanning
+and hinting faults.
+
+
 numa_balancing_scan_period_min_ms, numa_balancing_scan_delay_ms, numa_balancing_scan_period_max_ms, numa_balancing_scan_size_mb
 ===============================================================================================================================
 
