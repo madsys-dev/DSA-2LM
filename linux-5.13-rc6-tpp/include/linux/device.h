@@ -522,6 +522,9 @@ struct device {
 	struct cma *cma_area;		/* contiguous memory area for dma
 					   allocations */
 #endif
+#ifdef CONFIG_SWIOTLB
+	struct io_tlb_mem *dma_io_tlb_mem;
+#endif
 	/* arch specific additions */
 	struct dev_archdata	archdata;
 
