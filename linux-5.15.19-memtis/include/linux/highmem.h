@@ -13,7 +13,7 @@
 #include <asm/cacheflush.h>
 
 #include "highmem-internal.h"
-#include "../../linux/drivers/misc/experiment/exp.h"
+#include "../../drivers/misc/experiment/exp.h"
 
 /**
  * kmap - Map a page for long term usage
