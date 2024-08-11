@@ -12,6 +12,7 @@
 #include <asm/cacheflush.h>
 
 #include "highmem-internal.h"
+#include "../../drivers/misc/experiment/exp.h"
 
 /**
  * kmap - Map a page for long term usage
@@ -257,6 +258,9 @@ static inline void copy_user_highpage(struct page *to, struct page *from,
 	copy_user_page(vto, vfrom, vaddr, to);
 	kunmap_atomic(vto);
 	kunmap_atomic(vfrom);
+	if (READ_ONCE(timer_state) == TIMER_ON) {
+		atomic_long_inc(&base_page_cnt);
+	}
 }
 
 #endif
@@ -272,6 +276,9 @@ static inline void copy_highpage(struct page *to, struct page *from)
 	copy_page(vto, vfrom);
 	kunmap_atomic(vto);
 	kunmap_atomic(vfrom);
+	if (READ_ONCE(timer_state) == TIMER_ON) {
+		atomic_long_inc(&base_page_cnt);
+	}
 }
 
 #endif

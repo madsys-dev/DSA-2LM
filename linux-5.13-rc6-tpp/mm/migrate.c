@@ -58,6 +58,7 @@
 #include <trace/events/migrate.h>
 
 #include "internal.h"
+#include "../drivers/misc/experiment/exp.h"
 
 int isolate_movable_page(struct page *page, isolate_mode_t mode)
 {
@@ -564,10 +565,31 @@ static void __copy_gigantic_page(struct page *dst, struct page *src,
 	}
 }
 
-static void copy_huge_page(struct page *dst, struct page *src)
-{
-	int i;
-	int nr_pages;
+static void copy_huge_page_extra(struct page *dst, struct page *src, int nr_pages) {
+	long i = 0;
+	int rc = -1;
+
+	if (READ_ONCE(dsa_state) == DSA_ON && nr_pages >= 8) {
+		preempt_disable();
+		rc = dsa_multi_copy_pages(dst, src, nr_pages);
+		preempt_enable();
+		if (unlikely(rc != 0)) {
+			atomic_long_inc(&dsa_copy_fail);
+		}
+	}
+
+	if (rc) {
+		for (i = 0; i < nr_pages; i++) {
+			cond_resched();
+			copy_highpage(nth_page(dst, i), nth_page(src, i));
+		}
+	}
+}
+
+static void copy_huge_page(struct page *dst, struct page *src) {
+	int nr_pages, src_nid, dst_nid;
+	ktime_t start, end;
+	unsigned long flags;
 
 	if (PageHuge(src)) {
 		/* hugetlbfs page */
@@ -584,9 +606,24 @@ static void copy_huge_page(struct page *dst, struct page *src)
 		nr_pages = thp_nr_pages(src);
 	}
 
-	for (i = 0; i < nr_pages; i++) {
-		cond_resched();
-		copy_highpage(dst + i, src + i);
+	if (READ_ONCE(timer_state) == TIMER_ON) {
+		src_nid = page_to_nid(src);
+		dst_nid = page_to_nid(dst);
+
+		start = ktime_get();
+		copy_huge_page_extra(dst, src, nr_pages);
+		end = ktime_get();
+
+		last_time = ktime_sub(end, start);
+		spin_lock_irqsave(&timer_lock, flags);
+		total_time = ktime_add(total_time, last_time);
+		++copy_cnt;
+		++copy_dir_cnt[(src_nid << 1) | dst_nid];
+		dsa_copy_cnt += READ_ONCE(dsa_state) == DSA_ON;
+		spin_unlock_irqrestore(&timer_lock, flags);
+		atomic_long_inc(&huge_page_cnt);
+	} else {
+		copy_huge_page_extra(dst, src, nr_pages);
 	}
 }
 
