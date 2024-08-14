@@ -62,6 +62,7 @@ TRACE_EVENT(mm_migrate_pages,
 		__field(	unsigned long,		thp_split)
 		__field(	enum migrate_mode,	mode)
 		__field(	int,			reason)
+		__field(	const char *,		func_name) 
 	),
 
 	TP_fast_assign(
@@ -72,9 +73,11 @@ TRACE_EVENT(mm_migrate_pages,
 		__entry->thp_split	= thp_split;
 		__entry->mode		= mode;
 		__entry->reason		= reason;
+		__entry->func_name	= __func__;
 	),
 
-	TP_printk("nr_succeeded=%lu nr_failed=%lu nr_thp_succeeded=%lu nr_thp_failed=%lu nr_thp_split=%lu mode=%s reason=%s",
+	TP_printk("func=%s nr_succeeded=%lu nr_failed=%lu nr_thp_succeeded=%lu nr_thp_failed=%lu nr_thp_split=%lu mode=%s reason=%s",
+		__entry->func_name,
 		__entry->succeeded,
 		__entry->failed,
 		__entry->thp_succeeded,

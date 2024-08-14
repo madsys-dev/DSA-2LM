@@ -1334,6 +1334,8 @@ static struct page *alloc_demote_page(struct page *page, unsigned long node)
 	return alloc_migration_target(page, (unsigned long)&mtc);
 }
 
+int use_concur_to_demote = 0;
+
 /*
  * Take pages on @demote_list and attempt to demote them to
  * another node.  Pages which are not demoted are left on
@@ -1354,7 +1356,12 @@ unsigned int demote_page_list(struct list_head *demote_pages,
 	file_lru = page_is_file_lru(lru_to_page(demote_pages));
 
 	/* Demotion ignores all cpuset and mempolicy settings */
-	err = migrate_pages(demote_pages, alloc_demote_page, NULL,
+	if (use_concur_to_demote)
+		err = migrate_pages_concur(demote_pages, alloc_demote_page, NULL,
+			    target_nid, MIGRATE_ASYNC, MR_DEMOTION,
+			    &nr_succeeded);
+	else
+		err = migrate_pages(demote_pages, alloc_demote_page, NULL,
 			    target_nid, MIGRATE_ASYNC, MR_DEMOTION,
 			    &nr_succeeded);
 

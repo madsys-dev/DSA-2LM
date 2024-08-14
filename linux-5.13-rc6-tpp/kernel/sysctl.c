@@ -106,6 +106,11 @@
 
 #if defined(CONFIG_SYSCTL)
 
+extern int cpu_multi_copy_pages;
+extern int use_concur_to_compact;
+extern int use_concur_to_demote;
+extern unsigned int limit_mt_num;
+
 /* Constants used for minimum and  maximum */
 #ifdef CONFIG_LOCKUP_DETECTOR
 static int sixty = 60;
@@ -2817,6 +2822,40 @@ static struct ctl_table vm_table[] = {
 		.extra2			= SYSCTL_ONE,
 	},
 #endif
+	{
+		.procname	= "cpu_multi_copy_pages",
+		.data		= &cpu_multi_copy_pages,
+		.maxlen		= sizeof(cpu_multi_copy_pages),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_ONE,
+	},
+	{
+		.procname	= "use_concur_to_compact",
+		.data		= &use_concur_to_compact,
+		.maxlen		= sizeof(use_concur_to_compact),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_ONE,
+	},
+	{
+		.procname	= "use_concur_to_demote",
+		.data		= &use_concur_to_demote,
+		.maxlen		= sizeof(use_concur_to_demote),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_ONE,
+	},
+	{
+		.procname	= "limit_mt_num",
+		.data		= &limit_mt_num,
+		.maxlen		= sizeof(limit_mt_num),
+		.mode		= 0644,
+		.proc_handler	= proc_douintvec,
+	},
 	 {
 		.procname	= "hugetlb_shm_group",
 		.data		= &sysctl_hugetlb_shm_group,

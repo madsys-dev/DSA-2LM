@@ -2273,6 +2273,8 @@ bool compaction_zonelist_suitable(struct alloc_context *ac, int order,
 	return false;
 }
 
+int use_concur_to_compact = 0;
+
 static enum compact_result
 compact_zone(struct compact_control *cc, struct capture_control *capc)
 {
@@ -2399,9 +2401,14 @@ compact_zone(struct compact_control *cc, struct capture_control *capc)
 			last_migrated_pfn = iteration_start_pfn;
 		}
 
-		err = migrate_pages(&cc->migratepages, compaction_alloc,
-				compaction_free, (unsigned long)cc, cc->mode,
-				MR_COMPACTION, &nr_succeeded);
+		if (use_concur_to_compact)
+			err = migrate_pages_concur(&cc->migratepages, compaction_alloc,
+					compaction_free, (unsigned long)cc, cc->mode,
+					MR_COMPACTION, &nr_succeeded);
+		else
+			err = migrate_pages(&cc->migratepages, compaction_alloc,
+					compaction_free, (unsigned long)cc, cc->mode,
+					MR_COMPACTION, &nr_succeeded);
 
 		trace_mm_compaction_migratepages(cc->nr_migratepages, err,
 							&cc->migratepages);

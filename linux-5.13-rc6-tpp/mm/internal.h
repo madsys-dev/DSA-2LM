@@ -647,4 +647,8 @@ int vmap_pages_range_noflush(unsigned long addr, unsigned long end,
 
 void vunmap_range_noflush(unsigned long start, unsigned long end);
 
+extern int copy_page_lists_mt(struct page **to,
+			struct page **from, int nr_pages);
+extern int copy_page_multithread(struct page *to, struct page *from, int nr_pages);
+
 #endif	/* __MM_INTERNAL_H */
