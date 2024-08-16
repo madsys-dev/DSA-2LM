@@ -96,23 +96,23 @@ echo 12 > /proc/sys/vm/dsa_copy_threshold # use dsa to copy pages if number of p
 
 ## Our Completed Work
 
-- [x] 第一个在 Kernel Space 下应用 DSA 透明加速了页面迁移和页面规整，不必修改应用程序源码即可享受到加速效果。
+✅ 第一个在 Kernel Space 下应用 DSA 透明加速了页面迁移和页面规整，不必修改应用程序源码即可享受到加速效果。
 
   > DSA 目前生态比较匮乏，现有的很多 DSA 的使用案例也是在 User Space 下的。据我所知，目前开源的唯一在 Kernel Space 有应用的是 Anolis 里用 DSA 来实现了[页清零](https://gitee.com/anolis/cloud-kernel/pulls/702)。（注：当时为了学习如何在内核中使用 DSA 找了好久示例代码，后面才意外找到，可惜找到的时候我已经知道该怎么用了）
 
-- [x] 放弃直接使用 DMA Engine API，利用 IDXD Driver 实现对 DSA 更精细的控制。通过预分配、定制的 PER_CPU_VAR 的 Descriptor Pool，避免 DMA Engine 带来的额外开销。
+✅ 放弃直接使用 DMA Engine API，利用 IDXD Driver 实现对 DSA 更精细的控制。通过预分配、定制的 PER_CPU_VAR 的 Descriptor Pool，避免 DMA Engine 带来的额外开销。
 
   > Anolis 里[页清零](https://gitee.com/anolis/cloud-kernel/pulls/702)的代码也只是比较 naive 的调用 DMA Engine API 来完成。实际上 IDXD 实现 DMA Prepare Descriptor 回调函数的内容是写死固定的，在不更改驱动代码的情况下无法使用 DMA 对 DSA 完成除 memcpy 以外的操作。
 
-- [x] 实现了 Multi-channel (up to 8-channel) 2MB HugePage/THP 的页面迁移，相比 CPU 的 Latency 有 3~14x 的加速。对于 4KB base page，利用 DSA Batch Processing 实现了对一组页面的批量迁移，相比 CPU 的 Latency 有 1.5~4x 的加速。
+✅ 实现了 Multi-channel (up to 8-channel) 2MB HugePage/THP 的页面迁移，相比 CPU 的 Latency 有 3\~14x 的加速。对于 4KB base page，利用 DSA Batch Processing 实现了对一组页面的批量迁移，相比 CPU 的 Latency 有 1.5\~4x 的加速。
 
   > 核心实现在于 `dsa_copy_page_lists`，将 Multi-channel 和 Batch Processing 融为一体，对于一个 List 中 4KB 基页和 2MB THP 的混合页面场景，也能够统一高效地处理。
 
-- [x] 在 Linux 5.13 上实现了 Concurrent Migrate Pages（参考 Nimble 作者的研究成果），提高了页面迁移的效率。 对于一组待迁移的页面，支持基页和 THP 混合迁移，目前最大可支持 24 个大页 + 1024 个基页同时迁移。
+✅ 在 Linux 5.13 上实现了 Concurrent Migrate Pages（参考 Nimble 作者的研究成果），提高了页面迁移的效率。 对于一组待迁移的页面，支持基页和 THP 混合迁移，目前最大可支持 24 个大页 + 1024 个基页同时迁移。
 
   > 这部分我仔细读了 Nimble 在 5.4 上实现的 migrate_pages_concur 相关的代码，并结合 5.13 代码的变化，在 5.13 上成功实现了 migrate_pages_concur。
 
-- [x] 对于 In-kernel Use of DSA 以及 Page Migration 做了 Profiling，同时我们将 IDXD Driver 移植到 5.13 和 5.15 上，将 DSA 应用于 TPP、MEMTIS 等现有分层内存内核，取得了良好效果。
+✅ 对于 In-kernel Use of DSA 以及 Page Migration 做了 Profiling，同时我们将 IDXD Driver 移植到 5.13 和 5.15 上，将 DSA 应用于 TPP、MEMTIS 等现有分层内存内核，取得了良好效果。
 
   > 将 6.4.16 的 IDXD Driver 的代码移植到 5.15.19 和 5.13-rc6 上，将 5.15.19 的 IOMMU 的代码移植到 5.13-rc6 上。
 
