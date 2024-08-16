@@ -579,16 +579,20 @@ static void copy_huge_page_extra(struct page *dst, struct page *src, int nr_page
 	long i = 0;
 	int rc = -1;
 
-	if (dsa_state == DSA_ON) {
-		preempt_disable();
+	if (use_dsa_copy_pages) {
 		rc = dsa_multi_copy_pages(dst, src, nr_pages);
-		preempt_enable();
 		if (unlikely(rc != 0)) {
 			atomic_long_inc(&dsa_copy_fail);
+		}
+		if (rc == 0 && timer_state == TIMER_ON) {
+			atomic_long_inc(&dsa_hpage_cnt);
 		}
 	} 
 	else if (cpu_multi_copy_pages) {
 		rc = copy_page_multithread(dst, src, nr_pages);
+		if (rc == 0 && timer_state == TIMER_ON) {
+			atomic_long_inc(&hpage_cnt);
+		}
 	}
 
 	if (rc) {
@@ -596,11 +600,14 @@ static void copy_huge_page_extra(struct page *dst, struct page *src, int nr_page
 			cond_resched();
 			copy_highpage(nth_page(dst, i), nth_page(src, i));
 		}
+		if (timer_state == TIMER_ON) {
+			atomic_long_inc(&hpage_cnt);
+		}
 	}
 }
 
 static void copy_huge_page(struct page *dst, struct page *src) {
-	int nr_pages, src_nid, dst_nid;
+	int nr_pages;
 	ktime_t start, end;
 	unsigned long flags;
 
@@ -619,22 +626,17 @@ static void copy_huge_page(struct page *dst, struct page *src) {
 		nr_pages = thp_nr_pages(src);
 	}
 
-	if (READ_ONCE(timer_state) == TIMER_ON) {
-		src_nid = page_to_nid(src);
-		dst_nid = page_to_nid(dst);
+	if (timer_state == TIMER_ON) {
 
 		start = ktime_get();
 		copy_huge_page_extra(dst, src, nr_pages);
 		end = ktime_get();
 
 		last_time = ktime_sub(end, start);
+		last_cnt = nr_pages;
 		spin_lock_irqsave(&timer_lock, flags);
 		total_time = ktime_add(total_time, last_time);
-		++copy_cnt;
-		++copy_dir_cnt[(src_nid << 1) | dst_nid];
-		dsa_copy_cnt += READ_ONCE(dsa_state) == DSA_ON;
 		spin_unlock_irqrestore(&timer_lock, flags);
-		atomic_long_inc(&huge_page_cnt);
 	} else {
 		copy_huge_page_extra(dst, src, nr_pages);
 	}
@@ -1694,7 +1696,7 @@ out:
 	count_vm_events(THP_MIGRATION_FAIL, nr_thp_failed);
 	count_vm_events(THP_MIGRATION_SPLIT, nr_thp_split);
 	trace_mm_migrate_pages(*nr_succeeded, nr_failed, nr_thp_succeeded,
-			       nr_thp_failed, nr_thp_split, mode, reason);
+			       nr_thp_failed, nr_thp_split, mode, reason, "migrate_pages");
 
 	if (!swapwrite)
 		current->flags &= ~PF_SWAPWRITE;
@@ -1995,13 +1997,48 @@ static int move_mapping_concurr(struct list_head *unmapped_list_ptr,
 	return 0;
 }
 
+static __always_inline int copy_page_lists(struct page **to, struct page **from, 
+				int nr_items, int hpage, int bpage) {
+	int nr_pages = 0;
+	int rc = -ENOSYS;
+
+	// max_hpage_cnt = max(hpage, max_hpage_cnt);
+	// max_bpage_cnt = max(bpage, max_bpage_cnt);
+
+	if (hpage > 24 || bpage > 1024) {
+		return -ENOSYS;
+	}
+
+	nr_pages = (hpage << 9) + bpage;
+	if (use_dsa_copy_pages && nr_pages >= dsa_copy_threshold) {
+		rc = dsa_copy_page_lists(to, from, nr_items);
+		if (unlikely(rc != 0)) {
+			atomic_long_inc(&dsa_copy_fail);
+		}
+		if (rc == 0 && timer_state == TIMER_ON) {
+			atomic_long_add(bpage, &dsa_bpage_cnt);
+			atomic_long_add(hpage, &dsa_hpage_cnt);
+		}
+	}
+	else if (cpu_multi_copy_pages) {
+		rc = copy_page_lists_mt(to, from, nr_items);
+		if (rc == 0 && timer_state == TIMER_ON) {
+			atomic_long_add(bpage, &bpage_cnt);
+			atomic_long_add(hpage, &hpage_cnt);
+		}
+	}
+
+	return rc;
+}
+
 static int copy_to_new_pages_concur(struct list_head *unmapped_list_ptr,
 				enum migrate_mode mode)
 {
 	struct page_migration_work_item *iterator;
-	int num_pages = 0, idx = 0;
+	int num_pages = 0, idx = 0, hpage = 0, bpage = 0, sub_pages;
 	struct page **src_page_list = NULL, **dst_page_list = NULL;
-	unsigned long size = 0;
+	ktime_t start, end, duration;
+	unsigned long flags;
 	int rc = -EFAULT;
 #ifdef CONFIG_PAGE_MIGRATION_PROFILE
 	u64 timestamp;
@@ -2012,7 +2049,9 @@ static int copy_to_new_pages_concur(struct list_head *unmapped_list_ptr,
 
 	list_for_each_entry(iterator, unmapped_list_ptr, list) {
 		++num_pages;
-		size += PAGE_SIZE * thp_nr_pages(iterator->old_page);
+		sub_pages = thp_nr_pages(iterator->old_page);
+		hpage += (sub_pages > 1);
+		bpage += (sub_pages == 1);
 	}
 
 	src_page_list = kzalloc(sizeof(struct page *)*num_pages, GFP_KERNEL);
@@ -2045,9 +2084,23 @@ static int copy_to_new_pages_concur(struct list_head *unmapped_list_ptr,
 	// 	rc = copy_page_lists_dma_always(dst_page_list, src_page_list,
 	// 						num_pages);
 	// else if (mode & MIGRATE_MT)
-	if (cpu_multi_copy_pages)
-		rc = copy_page_lists_mt(dst_page_list, src_page_list,
-							num_pages);
+	if (timer_state == TIMER_ON) {
+
+		start = ktime_get();
+		rc = copy_page_lists(dst_page_list, src_page_list, num_pages, hpage, bpage);
+		end = ktime_get();
+
+		duration = ktime_sub(end, start);
+		spin_lock_irqsave(&timer_lock, flags);
+		if (rc == 0) {
+			last_time = duration;
+			last_cnt = (hpage << 9) + bpage;
+			total_time = ktime_add(total_time, duration);
+		}
+		spin_unlock_irqrestore(&timer_lock, flags);
+	} else {
+		rc = copy_page_lists(dst_page_list, src_page_list, num_pages, hpage, bpage);
+	}
 
 	if (rc) {
 		list_for_each_entry(iterator, unmapped_list_ptr, list) {
@@ -2322,7 +2375,7 @@ out:
 	count_vm_events(THP_MIGRATION_SUCCESS, nr_thp_succeeded);
 	count_vm_events(THP_MIGRATION_FAIL, nr_thp_failed);
 	trace_mm_migrate_pages(*nr_succeeded, nr_failed, nr_thp_succeeded,
-			       nr_thp_failed, 0, mode, reason);
+			       nr_thp_failed, 0, mode, reason, "migrate_pages_concur");
 	*nr_succeeded += nr_succeeded2;
 
 	if (item_list_order >= MAX_ORDER) {

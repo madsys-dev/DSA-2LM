@@ -49,10 +49,10 @@ TRACE_EVENT(mm_migrate_pages,
 
 	TP_PROTO(unsigned long succeeded, unsigned long failed,
 		 unsigned long thp_succeeded, unsigned long thp_failed,
-		 unsigned long thp_split, enum migrate_mode mode, int reason),
+		 unsigned long thp_split, enum migrate_mode mode, int reason, const char *func_name),
 
 	TP_ARGS(succeeded, failed, thp_succeeded, thp_failed,
-		thp_split, mode, reason),
+		thp_split, mode, reason, func_name),
 
 	TP_STRUCT__entry(
 		__field(	unsigned long,		succeeded)
@@ -73,7 +73,7 @@ TRACE_EVENT(mm_migrate_pages,
 		__entry->thp_split	= thp_split;
 		__entry->mode		= mode;
 		__entry->reason		= reason;
-		__entry->func_name	= __func__;
+		__entry->func_name	= func_name;
 	),
 
 	TP_printk("func=%s nr_succeeded=%lu nr_failed=%lu nr_thp_succeeded=%lu nr_thp_failed=%lu nr_thp_split=%lu mode=%s reason=%s",
