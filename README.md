@@ -1,11 +1,11 @@
-- [Kernel & Test Config](#kernel---test-config)
+- [Kernel & Test Config](#kernel--test-config)
   * [Kernel Config](#kernel-config)
   * [Test Config](#test-config)
 - [Our Completed Work](#our-completed-work)
   * [In-kernel Use of DSA Profiling](#in-kernel-use-of-dsa-profiling)
   * [Page Migration Profiling](#page-migration-profiling)
 - [Pending Work](#pending-work)
-- [Unresolved & Puzzled Problems](#unresolved---puzzled-problems)
+- [Unresolved & Puzzled Problems](#unresolved--puzzled-problems)
 - [Timeline](#timeline)
 
 ## Kernel & Test Config
@@ -40,7 +40,7 @@ linux-5.15.19-memtis 目前还是旧版代码，以下均指代 linux-5.13-rc6-t
 以下默认 root 用户，省略 sudo。
 
 ```shell
-git clone https://github.com/LRL52/kernels-with-dsa
+git clone https://github.com/LRL52/kernels-with-dsa.git
 cd kernels-with-dsa
 
 # Step 1：Disable CPU cores on node 1。Ignore if node 1 is already a CPU-less Node.
@@ -48,7 +48,7 @@ cd kernels-with-dsa
 
 # Step 2：Enable concurrent migrate pages
 echo 1 > /proc/sys/vm/use_concur_to_compact # concurrent migrate pages for memory compact
-echo 1 > /proc/sys/vm/use_concur_to_demote # concurrent migrate pages for demote pages
+echo 1 > /proc/sys/vm/use_concur_to_demote # concurrent migrate pages for page demotion
 
 # Step 3 (please choose one of following two）
 # Step 3 for DSA copy pages
@@ -114,7 +114,7 @@ echo 12 > /proc/sys/vm/dsa_copy_threshold # use dsa to copy pages if number of p
 
 ✅ 对于 In-kernel Use of DSA 以及 Page Migration 做了 Profiling，同时我们将 IDXD Driver 移植到 5.13 和 5.15 上，将 DSA 应用于 TPP、MEMTIS 等现有分层内存内核，取得了良好效果。
 
-  > 将 6.4.16 的 IDXD Driver 的代码移植到 5.15.19 和 5.13-rc6 上，将 5.15.19 的 IOMMU 的代码移植到 5.13-rc6 上。
+  > 将 6.4.16 的 IDXD Driver 的代码移植到 5.15.19 和 5.13-rc6 上，将 5.15.19 的 IOMMU 的代码移植到 5.13-rc6 上。这部分改动代码量不小，算是一个体力活吧。
 
 目前最新的 microbenchmark 结果，第一张图是 microbench-large，第二张图是 microbench-small。
 
