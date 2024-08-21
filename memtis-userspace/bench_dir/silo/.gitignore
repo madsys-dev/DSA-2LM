@@ -1,8 +1,0 @@
-*.o
-*.swp
-*.heap
-*.so
-core
-tags
-config.mk
-out-*
