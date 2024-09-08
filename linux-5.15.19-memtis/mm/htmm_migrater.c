@@ -329,6 +329,8 @@ static struct page *alloc_migrate_page(struct page *page, unsigned long node)
     return newpage;
 }
 
+int use_concur_for_htmm = 0;
+
 static unsigned long migrate_page_list(struct list_head *migrate_list,
 	pg_data_t *pgdat, bool promotion)
 {
@@ -344,9 +346,13 @@ static unsigned long migrate_page_list(struct list_head *migrate_list,
 	return 0;
 
     if (target_nid == NUMA_NO_NODE)
-	return 0;
+		return 0;
 
-    migrate_pages(migrate_list, alloc_migrate_page, NULL,
+	if (use_concur_for_htmm)
+		migrate_pages_concur(migrate_list, alloc_migrate_page, NULL,
+			target_nid, MIGRATE_ASYNC, MR_NUMA_MISPLACED, &nr_succeeded);
+	else
+		migrate_pages(migrate_list, alloc_migrate_page, NULL,
 	    target_nid, MIGRATE_ASYNC, MR_NUMA_MISPLACED, &nr_succeeded);
 
     if (promotion)

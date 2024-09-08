@@ -671,4 +671,8 @@ void vunmap_range_noflush(unsigned long start, unsigned long end);
 int numa_migrate_prep(struct page *page, struct vm_area_struct *vma,
 		      unsigned long addr, int page_nid, int *flags);
 
+extern int copy_page_lists_mt(struct page **to,
+			struct page **from, int nr_pages);
+extern int copy_page_multithread(struct page *to, struct page *from, int nr_pages);
+
 #endif	/* __MM_INTERNAL_H */

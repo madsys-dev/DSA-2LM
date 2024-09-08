@@ -108,6 +108,16 @@
 
 #if defined(CONFIG_SYSCTL)
 
+extern int cpu_multi_copy_pages;
+extern int use_concur_to_compact;
+extern int use_concur_to_demote;
+extern unsigned int limit_mt_num;
+extern int dsa_state;
+extern int use_dsa_copy_pages;
+extern int limit_chans;
+extern int dsa_copy_threshold;
+extern int use_concur_for_htmm;
+
 /* Constants used for minimum and  maximum */
 #ifdef CONFIG_LOCKUP_DETECTOR
 static int sixty = 60;
@@ -2868,6 +2878,81 @@ static struct ctl_table vm_table[] = {
 		.extra2			= SYSCTL_ONE,
 	},
 #endif
+	{
+		.procname	= "cpu_multi_copy_pages",
+		.data		= &cpu_multi_copy_pages,
+		.maxlen		= sizeof(cpu_multi_copy_pages),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_ONE,
+	},
+	{
+		.procname	= "use_concur_to_compact",
+		.data		= &use_concur_to_compact,
+		.maxlen		= sizeof(use_concur_to_compact),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_ONE,
+	},
+	{
+		.procname	= "use_concur_to_demote",
+		.data		= &use_concur_to_demote,
+		.maxlen		= sizeof(use_concur_to_demote),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_ONE,
+	},
+	{
+		.procname	= "limit_mt_num",
+		.data		= &limit_mt_num,
+		.maxlen		= sizeof(limit_mt_num),
+		.mode		= 0644,
+		.proc_handler	= proc_douintvec,
+	},
+	{
+		.procname	= "dsa_state",
+		.data		= &dsa_state,
+		.maxlen		= sizeof(dsa_state),
+		.mode		= 0644,
+		.proc_handler	= sysctl_dsa_state_handler,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_ONE,
+	},
+	{
+		.procname	= "use_dsa_copy_pages",
+		.data		= &use_dsa_copy_pages,
+		.maxlen		= sizeof(use_dsa_copy_pages),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_ONE,
+	},
+	{
+		.procname	= "limit_chans",
+		.data		= &limit_chans,
+		.maxlen		= sizeof(limit_chans),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
+	},
+	{
+		.procname	= "dsa_copy_threshold",
+		.data		= &dsa_copy_threshold,
+		.maxlen		= sizeof(dsa_copy_threshold),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
+	},
+	{
+		.procname	= "use_concur_for_htmm",
+		.data		= &use_concur_for_htmm,
+		.maxlen		= sizeof(use_concur_for_htmm),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_ONE,
+	},
 	 {
 		.procname	= "hugetlb_shm_group",
 		.data		= &sysctl_hugetlb_shm_group,

@@ -751,15 +751,25 @@ int __page_mapcount(struct page *page)
 }
 EXPORT_SYMBOL_GPL(__page_mapcount);
 
+int cpu_multi_copy_pages = 0;
 
 void copy_huge_page_extra(struct page *dst, struct page *src, int nr_pages) {
 	long i = 0;
 	int rc = -1;
 
-	if (READ_ONCE(dsa_state) == DSA_ON) {
-		rc = dsa_copy_page(dst, src, nr_pages);
+	if (use_dsa_copy_pages) {
+		rc = dsa_multi_copy_pages(dst, src, nr_pages);
 		if (unlikely(rc != 0)) {
 			atomic_long_inc(&dsa_copy_fail);
+		}
+		if (rc == 0 && timer_state == TIMER_ON) {
+			atomic_long_inc(&dsa_hpage_cnt);
+		}
+	} 
+	else if (cpu_multi_copy_pages) {
+		rc = copy_page_multithread(dst, src, nr_pages);
+		if (rc == 0 && timer_state == TIMER_ON) {
+			atomic_long_inc(&hpage_cnt);
 		}
 	}
 
@@ -768,38 +778,30 @@ void copy_huge_page_extra(struct page *dst, struct page *src, int nr_pages) {
 			cond_resched();
 			copy_highpage(nth_page(dst, i), nth_page(src, i));
 		}
+		if (timer_state == TIMER_ON) {
+			atomic_long_inc(&hpage_cnt);
+		}
 	}
 }
 
 void copy_huge_page(struct page *dst, struct page *src) {
+	int nr_pages;
 	ktime_t start, end;
-	int src_nid, dst_nid;
-	unsigned nr_pages;
 	unsigned long flags;
 
 	nr_pages = compound_nr(src);
 
-	if (nr_pages <= 1) {
-		copy_highpage(dst, src);
-		return;
-	}
-
-	if (READ_ONCE(timer_state) == TIMER_ON) {
-		src_nid = page_to_nid(src);
-		dst_nid = page_to_nid(dst);
+	if (timer_state == TIMER_ON) {
 
 		start = ktime_get();
 		copy_huge_page_extra(dst, src, nr_pages);
 		end = ktime_get();
 
 		last_time = ktime_sub(end, start);
+		last_cnt = nr_pages;
 		spin_lock_irqsave(&timer_lock, flags);
 		total_time = ktime_add(total_time, last_time);
-		++copy_cnt;
-		++copy_dir_cnt[(src_nid << 1) | dst_nid];
-		dsa_copy_cnt += READ_ONCE(dsa_state) == DSA_ON;
 		spin_unlock_irqrestore(&timer_lock, flags);
-		atomic_long_inc(&huge_page_cnt);
 	} else {
 		copy_huge_page_extra(dst, src, nr_pages);
 	}

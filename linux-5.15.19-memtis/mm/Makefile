@@ -64,6 +64,7 @@ memory-hotplug-$(CONFIG_MEMORY_HOTPLUG) += memory_hotplug.o
 obj-y += page-alloc.o
 obj-y += init-mm.o
 obj-y += memblock.o
+obj-y += copy_page.o
 obj-y += $(memory-hotplug-y)
 
 ifdef CONFIG_MMU
