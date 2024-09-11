@@ -66,6 +66,8 @@ void idxd_free_desc(struct idxd_wq *wq, struct idxd_desc *desc)
 {
 	int cpu = desc->cpu;
 
+	if (desc->id < 0)
+		return;
 	desc->cpu = -1;
 	sbitmap_queue_clear(&wq->sbq, desc->id, cpu);
 }

@@ -28,7 +28,7 @@
 ktime_t total_time, last_time;
 atomic_long_t dsa_copy_fail, hpage_cnt, bpage_cnt, dsa_hpage_cnt, dsa_bpage_cnt;
 unsigned long last_cnt;
-int timer_state, dsa_state, use_dsa_copy_pages, dsa_copy_threshold = 12;
+int timer_state, dsa_state, use_dsa_copy_pages, dsa_copy_threshold = 12, dsa_async_mode;
 // int max_hpage_cnt, max_bpage_cnt;
 int limit_chans = MAX_CHAN;
 DEFINE_SPINLOCK(timer_lock);
@@ -45,6 +45,7 @@ EXPORT_SYMBOL(timer_state);
 EXPORT_SYMBOL(dsa_state);
 EXPORT_SYMBOL(use_dsa_copy_pages);
 EXPORT_SYMBOL(dsa_copy_threshold);
+EXPORT_SYMBOL(dsa_async_mode);
 // EXPORT_SYMBOL(max_bpage_cnt);
 // EXPORT_SYMBOL(max_hpage_cnt);
 EXPORT_SYMBOL(limit_chans);
@@ -63,9 +64,12 @@ EXPORT_SYMBOL(timer_lock);
 #define TIMER_SHOW(name)
 #endif
 
+static unsigned long dsa_timeout_ms = 5000;
+static unsigned long dsa_timeout_jiffies;
 static struct dma_chan *channels[MAX_CHAN];
 static struct dma_device *copy_dev[MAX_CHAN];
 DEFINE_PER_CPU(local_lock_t, dsa_copy_local_lock) = INIT_LOCAL_LOCK(dsa_copy_local_lock);
+DEFINE_PER_CPU(struct mutex, dsa_copy_local_mutex);
 #ifdef USE_PER_CPU_VARIABLES
 DEFINE_PER_CPU(struct page*, global_idxd_desc_page[MAX_CHAN]);
 DEFINE_PER_CPU(struct idxd_desc*, global_idxd_desc[MAX_CHAN]);
@@ -77,6 +81,8 @@ DEFINE_PER_CPU(struct page*, global_dsa_bdesc_page[MAX_CHAN]);
 DEFINE_PER_CPU(struct dsa_hw_desc*, global_dsa_bdesc[MAX_CHAN]); // Descriptor List Address (VA)
 DEFINE_PER_CPU(struct page*, global_dsa_bcomp_page[MAX_CHAN]);
 DEFINE_PER_CPU(struct dsa_completion_record*, global_dsa_bcomp[MAX_CHAN]); // Completion List Address (VA)
+DEFINE_PER_CPU(struct page*, global_completion_page[MAX_CHAN]);
+DEFINE_PER_CPU(struct completion*, global_completion[MAX_CHAN]);
 #else
 static struct page *global_idxd_desc_page[NR_CPUS][MAX_CHAN];
 static struct idxd_desc *global_idxd_desc[NR_CPUS][MAX_CHAN];
@@ -88,6 +94,8 @@ static struct page *global_dsa_bdesc_page[NR_CPUS][MAX_CHAN];
 static struct dsa_hw_desc *global_dsa_bdesc[NR_CPUS][MAX_CHAN];
 static struct page *global_dsa_bcomp_page[NR_CPUS][MAX_CHAN];
 static struct dsa_completion_record *global_dsa_bcomp[NR_CPUS][MAX_CHAN];
+static struct page *global_completion_page[NR_CPUS][MAX_CHAN];
+static struct completion *global_completion[NR_CPUS][MAX_CHAN];
 #endif
 
 #ifdef USE_PER_CPU_VARIABLES
@@ -100,6 +108,7 @@ static struct dsa_completion_record *global_dsa_bcomp[NR_CPUS][MAX_CHAN];
     #define this_cpu_ptr_wrapper(ptr) (&((ptr)[smp_processor_id()]))
 #endif
 
+static void dma_complete_func(void *completion) { complete(completion); }
 static inline struct idxd_wq *to_idxd_wq(struct dma_chan *c) {
 	struct idxd_dma_chan *idxd_chan;
 
@@ -112,8 +121,9 @@ static int dsa_init(void) {
     struct idxd_desc *idxd_desc;
     struct dsa_hw_desc *dsa_desc, *dsa_bdesc;
     struct dsa_completion_record *dsa_comp, *dsa_bcomp;
+    struct completion *done;
     struct idxd_wq *wq;
-    struct page *idxd_desc_page, *dsa_desc_page, *dsa_comp_page, *dsa_bdesc_page, *dsa_bcomp_page;
+    struct page *idxd_desc_page, *dsa_desc_page, *dsa_comp_page, *dsa_bdesc_page, *dsa_bcomp_page, *completion_page;
     int cpu, i, j;
 
     dma_cap_zero(mask);
@@ -148,8 +158,12 @@ static int dsa_init(void) {
             dsa_comp_page = ((struct page**)per_cpu_ptr_wrapper(global_dsa_comp_page, cpu))[i];
             ((struct dsa_completion_record**)per_cpu_ptr_wrapper(global_dsa_comp, cpu))[i] = page_to_virt(dsa_comp_page);
 
-            if (!idxd_desc_page || !dsa_desc_page || !dsa_comp_page) {
-                pr_err("Failed to allocate page for idxd_desc, dsa_desc or dsa_comp.\n");
+            ((struct page**)per_cpu_ptr_wrapper(global_completion_page, cpu))[i] = alloc_page(GFP_KERNEL);
+            completion_page = ((struct page**)per_cpu_ptr_wrapper(global_completion_page, cpu))[i];
+            ((struct completion**)per_cpu_ptr_wrapper(global_completion, cpu))[i] = page_to_virt(completion_page);
+            
+            if (!idxd_desc_page || !dsa_desc_page || !dsa_comp_page || !completion_page) {
+                pr_err("Failed to allocate page for idxd_desc, dsa_desc, dsa_comp or completion.\n");
                 goto NODEV;
             }
 
@@ -159,6 +173,8 @@ static int dsa_init(void) {
             memset(dsa_desc, 0, PAGE_SIZE);
             dsa_comp = page_to_virt(dsa_comp_page);
             memset(dsa_comp, 0, PAGE_SIZE);
+            done = page_to_virt(completion_page);
+            memset(done, 0, PAGE_SIZE);
             
             wq = to_idxd_wq(channels[i]);
             for (j = 0; j < MAX_IDXD_DESC; ++j) {
@@ -167,6 +183,7 @@ static int dsa_init(void) {
                 idxd_desc[j].completion = &dsa_comp[j];
                 idxd_desc[j].compl_dma = virt_to_phys(idxd_desc[j].completion);
                 idxd_desc[j].cpu = cpu;
+                idxd_desc[j].id = -1;
                 idxd_desc[j].wq = wq;
 
                 dsa_desc[j].priv = 1;
@@ -204,6 +221,12 @@ static int dsa_init(void) {
         }
     }
 
+    for_each_possible_cpu(cpu) {
+        mutex_init(per_cpu_ptr(&dsa_copy_local_mutex, cpu));
+    }
+
+    dsa_timeout_jiffies = msecs_to_jiffies(dsa_timeout_ms);
+
     return 0;
 
 NODEV:
@@ -239,6 +262,10 @@ static void dsa_release(void) {
                 __free_page(page);
             }
             page = ((struct page**)per_cpu_ptr_wrapper(global_dsa_comp_page, cpu))[i];
+            if (page) {
+                __free_page(page);
+            }
+            page = ((struct page**)per_cpu_ptr_wrapper(global_completion_page, cpu))[i];
             if (page) {
                 __free_page(page);
             }
@@ -299,9 +326,19 @@ static __always_inline void wait_for_dsa_completion(struct idxd_desc *idxd_desc,
 
 static int idxd_fast_submit_desc(struct idxd_wq *wq, struct idxd_desc *desc) {
 	void __iomem *portal;
+    struct idxd_irq_entry *ie = NULL;
+    u32 desc_flags = desc->hw->flags;
 
 	portal = idxd_wq_portal_addr(wq);
-	wmb();
+	
+    wmb();
+
+    if (desc_flags & IDXD_OP_FLAG_RCI) {
+		ie = &wq->ie;
+		desc->hw->int_handle = ie->int_handle;
+		llist_add(&desc->llnode, &ie->pending_llist);
+	}
+
 	iosubmit_cmds512(portal, desc->hw, 1);
 
 	return 0;
@@ -310,13 +347,18 @@ static int idxd_fast_submit_desc(struct idxd_wq *wq, struct idxd_desc *desc) {
 // require nr_pages mod limit_chans equals 0
 // it's non-reentrant functions because of per-cpu variables, or use preempt_disable/enable
 int dsa_multi_copy_pages(struct page *to, struct page *from, int nr_pages) {
+    struct mutex *cur_mutex;
     struct idxd_desc **idxd_desc;
+    struct completion **done;
     uint32_t page_offset, poll_retry = 0;
     int i;
 
-    local_lock(&dsa_copy_local_lock);
+    // local_lock(&dsa_copy_local_lock);
+    cur_mutex = this_cpu_ptr(&dsa_copy_local_mutex);
+    mutex_lock(cur_mutex);
 
     TIMER_ON(prepare_desc);
+    done = (struct completion**)this_cpu_ptr_wrapper(global_completion);
     idxd_desc = (struct idxd_desc**)this_cpu_ptr_wrapper(global_idxd_desc);
     // page_offset = nr_pages / limit_chans;
     page_offset = nr_pages * PAGE_SIZE / limit_chans;
@@ -326,6 +368,13 @@ int dsa_multi_copy_pages(struct page *to, struct page *from, int nr_pages) {
         idxd_desc[i][0].hw->dst_addr = page_to_phys(to) + i * page_offset;
         idxd_desc[i][0].hw->xfer_size = page_offset;
         idxd_desc[i][0].completion->status = DSA_COMP_NONE;
+        
+        if (dsa_async_mode) {
+            init_completion(&done[i][0]);
+            idxd_desc[i][0].hw->flags |= IDXD_OP_FLAG_RCI;
+            idxd_desc[i][0].txd.callback = dma_complete_func;
+            idxd_desc[i][0].txd.callback_param = &done[i][0];
+        }
         // pr_notice("wq name: %s id %d size %u max_wq %d\n", idxd_desc[i].wq->name, idxd_desc[i].wq->id, idxd_desc[i].wq->size, idxd_desc[i].wq->idxd->max_wqs);
         idxd_fast_submit_desc(idxd_desc[i][0].wq, &idxd_desc[i][0]);
     }
@@ -339,17 +388,22 @@ int dsa_multi_copy_pages(struct page *to, struct page *from, int nr_pages) {
 
     TIMER_ON(wait_for_completion);
     for (i = 0; i < limit_chans; ++i) {
-        wait_for_dsa_completion(&idxd_desc[i][0], &poll_retry);
+        if (dsa_async_mode)
+            wait_for_completion_timeout(&done[i][0], dsa_timeout_jiffies);
+        else
+            wait_for_dsa_completion(&idxd_desc[i][0], &poll_retry);
         // pr_notice("idxd_desc[%d] status %u, poll_retry %u.\n", i, idxd_desc[i].completion->status, poll_retry);
         if (idxd_desc[i][0].completion->status != DSA_COMP_SUCCESS) {
             pr_err_ratelimited("idxd_desc[%d][%d] failed with status %u, poll_retry %u.\n", i, 0, idxd_desc[i][0].completion->status, poll_retry);
             use_dsa_copy_pages = 0;
+            mutex_unlock(cur_mutex);
             return -EIO;
         }
     }
     TIMER_OFF(wait_for_completion);
 
-    local_unlock(&dsa_copy_local_lock);
+    // local_unlock(&dsa_copy_local_lock);
+    mutex_unlock(cur_mutex);
 
 #ifdef TIMER_ENABLE
     // TIMER_SHOW(prepare_and_submit_desc);
