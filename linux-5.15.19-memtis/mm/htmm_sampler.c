@@ -30,7 +30,7 @@ static __u64 get_pebs_event(enum events e)
 	case DRAMREAD:
 	    return DRAM_LLC_LOAD_MISS;
 	case NVMREAD:
-	    if (!htmm_cxl_mode)
+	    if (htmm_cxl_mode)
 		return NVM_LLC_LOAD_MISS;
 	    else
 		return N_HTMMEVENTS;
@@ -80,8 +80,9 @@ static int __perf_event_open(__u64 config, __u64 config1, __u64 cpu,
     event_fd = htmm__perf_event_open(&attr, __pid, cpu, -1, 0);
     //event_fd = htmm__perf_event_open(&attr, -1, cpu, -1, 0);
     if (event_fd <= 0) {
-	printk("[error htmm__perf_event_open failure] event_fd: %d\n", event_fd);
-	return -1;
+	    printk("[error htmm__perf_event_open failure] event_fd: %d, config %llx, config1 %llx\n",
+		   event_fd, config, config1);
+	    return -1;
     }
 
     file = fget(event_fd);
@@ -97,24 +98,27 @@ static int pebs_init(pid_t pid, int node)
 {
     int cpu, event;
 
-    mem_event = kzalloc(sizeof(struct perf_event **) * CPUS_PER_SOCKET, GFP_KERNEL);
-    for (cpu = 0; cpu < CPUS_PER_SOCKET; cpu++) {
+    mem_event = kzalloc(sizeof(struct perf_event **) * num_online_cpus(), GFP_KERNEL);
+    for_each_online_cpu (cpu) {
 	mem_event[cpu] = kzalloc(sizeof(struct perf_event *) * N_HTMMEVENTS, GFP_KERNEL);
     }
     
-    printk("pebs_init\n");   
-    for (cpu = 0; cpu < CPUS_PER_SOCKET; cpu++) {
-	for (event = 0; event < N_HTMMEVENTS; event++) {
-	    if (get_pebs_event(event) == N_HTMMEVENTS) {
-		mem_event[cpu][event] = NULL;
-		continue;
-	    }
+    printk("pebs_init\n");
 
-	    if (__perf_event_open(get_pebs_event(event), 0, cpu, event, pid))
-		return -1;
-	    if (htmm__perf_event_init(mem_event[cpu][event], BUFFER_SIZE))
-		return -1;
-	}
+    for_each_online_cpu (cpu) {
+	    for (event = 0; event < N_HTMMEVENTS; event++) {
+		    if (get_pebs_event(event) == N_HTMMEVENTS) {
+			    mem_event[cpu][event] = NULL;
+			    continue;
+		    }
+
+		    if (__perf_event_open(get_pebs_event(event), 0, cpu, event,
+					  pid))
+			    return -1;
+		    if (htmm__perf_event_init(mem_event[cpu][event],
+					      BUFFER_SIZE))
+			    return -1;
+	    }
     }
 
     return 0;
@@ -122,15 +126,14 @@ static int pebs_init(pid_t pid, int node)
 
 static void pebs_disable(void)
 {
-    int cpu, event;
-
-    printk("pebs disable\n");
-    for (cpu = 0; cpu < CPUS_PER_SOCKET; cpu++) {
-	for (event = 0; event < N_HTMMEVENTS; event++) {
-	    if (mem_event[cpu][event])
-		perf_event_disable(mem_event[cpu][event]);
+	int cpu, event;
+	printk("pebs disable\n");
+	for_each_online_cpu (cpu) {
+		for (event = 0; event < N_HTMMEVENTS; event++) {
+			if (mem_event[cpu][event])
+				perf_event_disable(mem_event[cpu][event]);
+		}
 	}
-    }
 }
 
 static void pebs_enable(void)
@@ -138,7 +141,7 @@ static void pebs_enable(void)
     int cpu, event;
 
     printk("pebs enable\n");
-    for (cpu = 0; cpu < CPUS_PER_SOCKET; cpu++) {
+    for_each_online_cpu (cpu) {
 	for (event = 0; event < N_HTMMEVENTS; event++) {
 	    if (mem_event[cpu][event])
 		perf_event_enable(mem_event[cpu][event]);
@@ -150,7 +153,7 @@ static void pebs_update_period(uint64_t value, uint64_t inst_value)
 {
     int cpu, event;
 
-    for (cpu = 0; cpu < CPUS_PER_SOCKET; cpu++) {
+    for_each_online_cpu (cpu) {
 	for (event = 0; event < N_HTMMEVENTS; event++) {
 	    int ret;
 	    if (!mem_event[cpu][event])
@@ -220,7 +223,7 @@ static int ksamplingd(void *data)
 	    continue;
 	}
 	
-	for (cpu = 0; cpu < CPUS_PER_SOCKET; cpu++) {
+	for_each_online_cpu (cpu) {
 	    for (event = 0; event < N_HTMMEVENTS; event++) {
 		do {
 		    struct perf_buffer *rb;
