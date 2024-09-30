@@ -33,9 +33,7 @@ CONFIG_INTEL_IDXD_PERFMON=y
 
 ### Test Config
 
-linux-5.15.19-memtis 目前还是旧版代码，以下均指代 linux-5.13-rc6-tpp。
-
-在 `/proc/sys/vm/` 下留有多个 sysctl 接口用于控制，分别是 `cpu_multi_copy_pages`、`use_concur_to_compact`、`use_concur_to_demote`、`limit_mt_num`、`dsa_state`、`use_dsa_copy_pages`、`limit_chans`、`dsa_copy_threshold`，以及 `/proc/timer` 用于记录 page copy 相关统计信息。
+在 `/proc/sys/vm/` 下留有多个 sysctl 接口用于控制，分别是 `cpu_multi_copy_pages`、`use_concur_to_compact`、`use_concur_to_demote`、`limit_mt_num`、`dsa_state`、`use_dsa_copy_pages`、`limit_chans`、`dsa_copy_threshold`、`dsa_async_mode`，以及 `/proc/timer` 用于记录 page copy 相关统计信息。
 
 以下默认 root 用户，省略 sudo。
 
@@ -45,14 +43,19 @@ cd kernels-with-dsa
 
 # Step 1：Disable CPU cores on node 1。Ignore if node 1 is already a CPU-less Node.
 ./disable_cpu.sh 1
+```
 
+对于 linux-5.15.19-memtis，请忽略 Step 2，**MEMTIS 几乎强制大页，无需使用 concurrent migrate pages**，MEMTIS 下启用 concurrent migrate pages 可能莫名崩溃。
+
+```shell
 # Step 2：Enable concurrent migrate pages
 echo 1 > /proc/sys/vm/use_concur_to_compact # concurrent migrate pages for memory compact
 echo 1 > /proc/sys/vm/use_concur_to_demote # concurrent migrate pages for page demotion
 
-# Step 3 (please choose one of following two）
+# Step 3 (Please choose one of following two）
 # Step 3 for DSA copy pages
 accel-config load-config -c ./dsas-4e1w-d.conf -e
+echo 1 > /proc/sys/vm/dsa_async_mode # currently only available for MEMTIS, TPP code not yet updated
 echo 1 > /proc/sys/vm/dsa_state # initialize and enable DSA
 # PLEASE CHECK dmesg TO MAKE SURE THERE ARE NO ERROR BEFORE CONTINUTING!!!
 echo 1 > /proc/sys/vm/use_dsa_copy_pages # use DSA to copy pages
@@ -60,7 +63,7 @@ echo 1 > /proc/sys/vm/use_dsa_copy_pages # use DSA to copy pages
 # Step 3 for multi-thread copy pages
 echo 1 > /proc/sys/vm/cpu_multi_copy_pages # use multi-thread to copy pages
 
-# Step 4：TPP start tiering
+# Step 4：TPP start tiering, ignore for MEMTIS
 echo 1 >/sys/kernel/mm/numa/demotion_enabled
 echo 2 >/proc/sys/kernel/numa_balancing
 swapoff -a
