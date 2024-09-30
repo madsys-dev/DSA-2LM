@@ -118,6 +118,7 @@ extern int limit_chans;
 extern int dsa_copy_threshold;
 extern int use_concur_for_htmm;
 extern int dsa_async_mode;
+extern int dsa_sync_mode;
 
 /* Constants used for minimum and  maximum */
 #ifdef CONFIG_LOCKUP_DETECTOR
@@ -2962,6 +2963,15 @@ static struct ctl_table vm_table[] = {
 		.proc_handler	= proc_dointvec_minmax,
 		.extra1		= SYSCTL_ZERO,
 		.extra2		= SYSCTL_ONE,
+	},
+	{
+		.procname	= "dsa_sync_mode",
+		.data		= &dsa_sync_mode,
+		.maxlen		= sizeof(dsa_sync_mode),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_THREE,
 	},
 	 {
 		.procname	= "hugetlb_shm_group",
