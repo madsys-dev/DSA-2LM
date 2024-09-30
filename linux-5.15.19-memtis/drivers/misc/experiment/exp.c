@@ -28,7 +28,8 @@
 ktime_t total_time, last_time;
 atomic_long_t dsa_copy_fail, hpage_cnt, bpage_cnt, dsa_hpage_cnt, dsa_bpage_cnt;
 unsigned long last_cnt;
-int timer_state, dsa_state, use_dsa_copy_pages, dsa_copy_threshold = 12, dsa_async_mode;
+int dsa_copy_threshold = 16;
+int timer_state, dsa_state, use_dsa_copy_pages, dsa_async_mode, dsa_sync_mode;
 // int max_hpage_cnt, max_bpage_cnt;
 int limit_chans = MAX_CHAN;
 DEFINE_SPINLOCK(timer_lock);
@@ -46,6 +47,7 @@ EXPORT_SYMBOL(dsa_state);
 EXPORT_SYMBOL(use_dsa_copy_pages);
 EXPORT_SYMBOL(dsa_copy_threshold);
 EXPORT_SYMBOL(dsa_async_mode);
+EXPORT_SYMBOL(dsa_sync_mode);
 // EXPORT_SYMBOL(max_bpage_cnt);
 // EXPORT_SYMBOL(max_hpage_cnt);
 EXPORT_SYMBOL(limit_chans);
@@ -311,14 +313,26 @@ static inline int umwait(unsigned long timeout, unsigned int state) {
 
 static __always_inline void wait_for_dsa_completion(struct idxd_desc *idxd_desc, int *poll_retry) {
     *poll_retry = 0;
-    // while (idxd_desc->completion->status == DSA_COMP_NONE && ++(*poll_retry) < POLL_RETRY_MAX);
-    // while (idxd_desc->completion->status == DSA_COMP_NONE && ++(*poll_retry) < POLL_RETRY_MAX) __builtin_ia32_pause();
-    while (idxd_desc->completion->status == DSA_COMP_NONE && ++(*poll_retry) < POLL_RETRY_MAX) {
-        umonitor(idxd_desc->completion);
-        if (idxd_desc->completion->status == DSA_COMP_NONE) {
-            umwait(rdtsc() + UMWAIT_DELAY, UMWAIT_STATE);
-        }
+    switch (dsa_sync_mode) {
+        case 0: 
+            while (idxd_desc->completion->status == DSA_COMP_NONE && ++(*poll_retry) < POLL_RETRY_MAX);
+            break;
+        case 1: 
+            while (idxd_desc->completion->status == DSA_COMP_NONE && ++(*poll_retry) < POLL_RETRY_MAX) cond_resched();
+            break;
+        case 2: 
+            while (idxd_desc->completion->status == DSA_COMP_NONE && ++(*poll_retry) < POLL_RETRY_MAX) __builtin_ia32_pause();
+            break;
+        case 3:
+            while (idxd_desc->completion->status == DSA_COMP_NONE && ++(*poll_retry) < POLL_RETRY_MAX) {
+                umonitor(idxd_desc->completion);
+                if (idxd_desc->completion->status == DSA_COMP_NONE) {
+                    umwait(rdtsc() + UMWAIT_DELAY, UMWAIT_STATE);
+                }
+            }
+            break;
     }
+    
     // if (idxd_desc->completion->status != DSA_COMP_SUCCESS) {
     //     pr_err("idxd_desc failed with status %u, poll_retry %u.\n", idxd_desc->completion->status, *poll_retry);
     // }
@@ -367,6 +381,7 @@ int dsa_multi_copy_pages(struct page *to, struct page *from, int nr_pages) {
         idxd_desc[i][0].hw->src_addr = page_to_phys(from) + i * page_offset;
         idxd_desc[i][0].hw->dst_addr = page_to_phys(to) + i * page_offset;
         idxd_desc[i][0].hw->xfer_size = page_offset;
+        idxd_desc[i][0].hw->flags = IDXD_OP_FLAG_CRAV | IDXD_OP_FLAG_RCR;
         idxd_desc[i][0].completion->status = DSA_COMP_NONE;
         
         if (dsa_async_mode) {
@@ -512,7 +527,9 @@ EXPORT_SYMBOL(dsa_copy_page);
 // use dsa to copy a list of pages containing 4KB base pages and 2MB thp pages
 // use multiple channels to copy 2MB pages and batch processing to copy 4KB pages
 int dsa_copy_page_lists(struct page **to, struct page **from, int nr_items) {
+    struct mutex *cur_mutex;
     struct idxd_desc **idxd_desc;
+    struct completion **done;
     struct dsa_hw_desc **dsa_bdesc;
     struct dsa_completion_record **dsa_bcomp;
     uint32_t page_offset, poll_retry;
@@ -521,8 +538,11 @@ int dsa_copy_page_lists(struct page **to, struct page **from, int nr_items) {
     int begin = 0, end = 0;
     int tail[MAX_CHAN];
 
-    local_lock(&dsa_copy_local_lock);
+    // local_lock(&dsa_copy_local_lock);
+    cur_mutex = this_cpu_ptr(&dsa_copy_local_mutex);
+    mutex_lock(cur_mutex);
 
+    done = (struct completion**)this_cpu_ptr_wrapper(global_completion);
     idxd_desc = (struct idxd_desc**)this_cpu_ptr_wrapper(global_idxd_desc);
     dsa_bdesc = (struct dsa_hw_desc**)this_cpu_ptr_wrapper(global_dsa_bdesc);
     dsa_bcomp = (struct dsa_completion_record**)this_cpu_ptr_wrapper(global_dsa_bcomp);
@@ -536,6 +556,7 @@ retry:
     for (i = begin; i < nr_items; ++i) {
         if (thp_nr_pages(from[i]) != thp_nr_pages(to[i])) {
             pr_err("The number of pages in from[%d] and to[%d] are not equal, thp_nr_pages(from[%d]) = %d, thp_nr_pages(to[%d]) = %d.\n", i, i, i, thp_nr_pages(from[i]), i, thp_nr_pages(to[i]));
+            mutex_unlock(cur_mutex);
             return -EINVAL;
         }
         sub_pages = thp_nr_pages(from[i]);
@@ -548,6 +569,15 @@ retry:
                 idxd_desc[j][t].hw->dst_addr = page_to_phys(to[i]) + j * page_offset;
                 idxd_desc[j][t].hw->xfer_size = page_offset;
                 idxd_desc[j][t].completion->status = DSA_COMP_NONE;
+                idxd_desc[i][0].hw->flags = IDXD_OP_FLAG_CRAV | IDXD_OP_FLAG_RCR;
+
+                if (dsa_async_mode) {
+                    init_completion(&done[j][t]);
+                    idxd_desc[j][t].hw->flags |= IDXD_OP_FLAG_RCI;
+                    idxd_desc[j][t].txd.callback = dma_complete_func;
+                    idxd_desc[j][t].txd.callback_param = &done[j][t];
+                }
+
                 // pr_notice("wq name: %s id %d size %u max_wq %d\n", idxd_desc[j].wq->name, idxd_desc[j].wq->id, idxd_desc[j].wq->size, idxd_desc[j].wq->idxd->max_wqs);
                 idxd_fast_submit_desc(idxd_desc[j][t].wq, &idxd_desc[j][t]);
             }
@@ -580,6 +610,14 @@ retry:
             idxd_desc[cur_chan][t].hw->dst_addr = page_to_phys(to[i]);
             idxd_desc[cur_chan][t].hw->xfer_size = PAGE_SIZE;
             idxd_desc[cur_chan][t].completion->status = DSA_COMP_NONE;
+            idxd_desc[cur_chan][t].hw->flags = IDXD_OP_FLAG_CRAV | IDXD_OP_FLAG_RCR;
+
+            if (dsa_async_mode) {
+                init_completion(&done[cur_chan][t]);
+                idxd_desc[cur_chan][t].hw->flags |= IDXD_OP_FLAG_RCI;
+                idxd_desc[cur_chan][t].txd.callback = dma_complete_func;
+                idxd_desc[cur_chan][t].txd.callback_param = &done[cur_chan][t];
+            }
 
             idxd_fast_submit_desc(idxd_desc[cur_chan][t].wq, &idxd_desc[cur_chan][t]);
             cur_chan = (cur_chan + 1 < limit_chans ? cur_chan + 1 : 0);
@@ -600,6 +638,14 @@ retry:
                 idxd_desc[cur_chan][t].hw->dst_addr = 0; // not used but must be set to 0
                 idxd_desc[cur_chan][t].hw->desc_count = nr_base_pages;
                 idxd_desc[cur_chan][t].completion->status = DSA_COMP_NONE;
+                idxd_desc[cur_chan][t].hw->flags = IDXD_OP_FLAG_CRAV | IDXD_OP_FLAG_RCR;
+
+                if (dsa_async_mode) {
+                    init_completion(&done[cur_chan][t]);
+                    idxd_desc[cur_chan][t].hw->flags |= IDXD_OP_FLAG_RCI;
+                    idxd_desc[cur_chan][t].txd.callback = dma_complete_func;
+                    idxd_desc[cur_chan][t].txd.callback_param = &done[cur_chan][t];
+                }
 
                 idxd_fast_submit_desc(idxd_desc[cur_chan][t].wq, &idxd_desc[cur_chan][t]);
 
@@ -612,9 +658,13 @@ retry:
     // wait for completion
     for (i = 0; i < limit_chans; ++i) {
         for (j = 0; j < tail[i]; ++j) {
-            wait_for_dsa_completion(&idxd_desc[i][j], &poll_retry);
+            if (dsa_async_mode)
+                wait_for_completion_timeout(&done[i][j], dsa_timeout_jiffies);
+            else
+                wait_for_dsa_completion(&idxd_desc[i][j], &poll_retry);
             if (idxd_desc[i][j].completion->status != DSA_COMP_SUCCESS) {
                 pr_err_ratelimited("idxd_desc[%d][%d] failed with status %u, poll_retry %u.\n", i, j, idxd_desc[i][j].completion->status, poll_retry);
+                mutex_unlock(cur_mutex);
                 return -EIO;
             }
         }
@@ -625,10 +675,12 @@ retry:
     }
 
 
-    local_unlock(&dsa_copy_local_lock);
+    // local_unlock(&dsa_copy_local_lock);
+    mutex_unlock(cur_mutex);
 
     return 0;
 }
+EXPORT_SYMBOL(dsa_copy_page_lists);
 
 static int timer_proc_show(struct seq_file *m, void *v) {
     seq_printf(m, 
