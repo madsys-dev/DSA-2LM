@@ -8,7 +8,7 @@
 
 extern ktime_t total_time, last_time;
 extern atomic_long_t dsa_copy_fail, hpage_cnt, bpage_cnt, dsa_hpage_cnt, dsa_bpage_cnt;
-extern int timer_state, dsa_state, use_dsa_copy_pages, dsa_copy_threshold;
+extern int timer_state, dsa_state, use_dsa_copy_pages, dsa_copy_threshold, dsa_async_mode, dsa_sync_mode;
 extern unsigned long last_cnt;
 // extern int max_hpage_cnt, max_bpage_cnt;
 extern int limit_chan;

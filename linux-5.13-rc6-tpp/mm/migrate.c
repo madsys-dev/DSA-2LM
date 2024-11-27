@@ -2005,10 +2005,6 @@ static __always_inline int copy_page_lists(struct page **to, struct page **from,
 	// max_hpage_cnt = max(hpage, max_hpage_cnt);
 	// max_bpage_cnt = max(bpage, max_bpage_cnt);
 
-	if (hpage > 24 || bpage > 1024) {
-		return -ENOSYS;
-	}
-
 	nr_pages = (hpage << 9) + bpage;
 	if (use_dsa_copy_pages && nr_pages >= dsa_copy_threshold) {
 		rc = dsa_copy_page_lists(to, from, nr_items);
