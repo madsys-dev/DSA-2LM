@@ -130,7 +130,7 @@ static void pebs_disable(void)
 	printk("pebs disable\n");
 	for_each_online_cpu (cpu) {
 		for (event = 0; event < N_HTMMEVENTS; event++) {
-			if (mem_event[cpu][event])
+			if (mem_event != NULL && mem_event[cpu][event])
 				perf_event_disable(mem_event[cpu][event]);
 		}
 	}
