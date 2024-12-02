@@ -195,6 +195,7 @@ void check_transhuge_cooling(void *arg, struct page *page, bool locked)
 		/* updates estimated base page histogram */
 		cur_idx = get_idx(pginfo->total_accesses);
 		memcg->ebp_hotness_hg[cur_idx]++;
+			// forget to memcg->ebp_hotness_hg[prev_idx]-- ?
 	    }
 
 	    /* halves access count for a huge page */
@@ -204,6 +205,7 @@ void check_transhuge_cooling(void *arg, struct page *page, bool locked)
 	    cur_idx = meta_page->total_accesses;
 	    cur_idx = get_idx(cur_idx);
 	    memcg->hotness_hg[cur_idx] += HPAGE_PMD_NR;
+		// forget to memcg->ebp_hotness_hg[prev_idx] -= HPAGE_PMD_NR ?
 	    meta_page->idx = cur_idx;
 
 	    /* updates skewness */
@@ -563,6 +565,9 @@ int get_skew_idx(unsigned long num)
     unsigned long tmp;
     
     /* 0, 1-3, 4-15, 16-63, 64-255, 256-1023, 1024-2047, 2048-3071, ... */
+	// comment above by original authors may be wrong, correct is as follows
+	// 0, 1, 2-3, 4-7, 8-15, 16-31, 32-63, 64-127, 128-255, 256-511, 512-1023, 
+	// 1024, 1025-2048, 2049-3072, ...
     tmp = num;
     if (tmp >= 1024) {
 	while (tmp > 1024 && cnt < 9) { // <16
@@ -972,10 +977,11 @@ static void update_huge_page(struct vm_area_struct *vma, pmd_t *pmd,
 	move_page_to_active_lru(page);
     }
     
-    if (hot)
-	move_page_to_active_lru(page);
-    else if (PageActive(page))
-	move_page_to_inactive_lru(page);
+	// additional code? original authors may forget to comment codes below 
+    // if (hot)
+	// 	move_page_to_active_lru(page);
+    // else if (PageActive(page))
+	// 	move_page_to_inactive_lru(page);
 }
 
 static int __update_pte_pginfo(struct vm_area_struct *vma, pmd_t *pmd,
