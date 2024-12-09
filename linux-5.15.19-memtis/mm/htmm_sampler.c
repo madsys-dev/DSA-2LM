@@ -1,6 +1,7 @@
 /*
  * memory access sampling for hugepage-aware tiered memory management.
  */
+#include "linux/stddef.h"
 #include <linux/kthread.h>
 #include <linux/memcontrol.h>
 #include <linux/mempolicy.h>
@@ -129,13 +130,29 @@ static int pebs_init(pid_t pid, int node)
 static void pebs_disable(void)
 {
 	int cpu, event;
+	struct perf_event *pe;
+
 	printk("pebs disable\n");
+	if (mem_event == NULL)
+		return;
 	for_each_online_cpu (cpu) {
+		if (mem_event[cpu] == NULL) 
+			continue;
 		for (event = 0; event < N_HTMMEVENTS; event++) {
-			if (mem_event != NULL && mem_event[cpu][event])
-				perf_event_disable(mem_event[cpu][event]);
+			if ((pe = mem_event[cpu][event]) != NULL) {
+				perf_event_disable(pe);
+				if (pe->rb) {
+					rb_free(pe->rb);
+					pe->rb = NULL;
+				}
+				perf_event_release_kernel(pe);
+				mem_event[cpu][event] = NULL;
+			}
 		}
+		kfree(mem_event[cpu]);
 	}
+	kfree(mem_event);
+	mem_event = NULL;
 }
 
 static void pebs_enable(void)
@@ -209,6 +226,8 @@ static int ksamplingd(void *data)
 	/* for analytic purpose */
 	unsigned long hr_dram = 0, hr_nvm = 0;
 
+	unsigned long period = 0;
+
 	/* orig impl: see read_sum_exec_runtime() */
 	trace_runtime = total_runtime = exec_runtime = t->se.sum_exec_runtime;
 
@@ -263,16 +282,16 @@ static int ksamplingd(void *data)
 					}
 
 					head -= up->data_tail;
-					if (head >
-					    (BUFFER_SIZE *
-					     ksampled_max_sample_ratio / 100)) {
-						cond = true;
-					} else if (head <
-						   (BUFFER_SIZE *
-						    ksampled_min_sample_ratio /
-						    100)) {
-						cond = false;
-					}
+					// if (head >
+					//     (BUFFER_SIZE *
+					//      ksampled_max_sample_ratio / 100)) {
+					// 	cond = true;
+					// } else if (head <
+					// 	   (BUFFER_SIZE *
+					// 	    ksampled_min_sample_ratio /
+					// 	    100)) {
+					// 	cond = false;
+					// }
 
 					/* read barrier */
 					smp_rmb();
@@ -332,14 +351,27 @@ static int ksamplingd(void *data)
 					}
 					/* read, write barrier */
 					smp_mb();
-					WRITE_ONCE(up->data_tail,
-						   up->data_tail + ph->size);
+					WRITE_ONCE(
+						up->data_tail,
+						up->data_head >= 5 * ph->size ?
+							max(up->data_tail +
+								    ph->size,
+							    up->data_head -
+								    5 * ph->size) :
+							up->data_tail +
+								ph->size);
 				} while (cond);
 			}
 		}
+
+		if (++period % 200000 == 0)
+			pr_info("nr_sampled: %llu\n", nr_sampled);
+
 		/* if ksampled_soft_cpu_quota is zero, disable dynamic pebs feature */
-		if (!ksampled_soft_cpu_quota)
+		if (!ksampled_soft_cpu_quota) {
+			cond_resched();
 			continue;
+		}
 
 		/* sleep */
 		schedule_timeout_interruptible(sleep_timeout);
@@ -421,13 +453,13 @@ static int ksamplingd(void *data)
 		}
 	}
 
-	total_runtime = (t->se.sum_exec_runtime) - total_runtime; // ns
-	total_cputime = jiffies_to_usecs(jiffies - total_cputime); // us
+	// total_runtime = (t->se.sum_exec_runtime) - total_runtime; // ns
+	// total_cputime = jiffies_to_usecs(jiffies - total_cputime); // us
 
 	printk("nr_sampled: %llu, nr_throttled: %llu, nr_lost: %llu\n",
 	       nr_sampled, nr_throttled, nr_lost);
-	printk("total runtime: %llu ns, total cputime: %lu us, cpu usage: %llu\n",
-	       total_runtime, total_cputime, (total_runtime) / total_cputime);
+	// printk("total runtime: %llu ns, total cputime: %lu us, cpu usage: %llu\n",
+	    //    total_runtime, total_cputime, (total_runtime) / total_cputime);
 
 	return 0;
 }
