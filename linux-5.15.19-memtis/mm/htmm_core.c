@@ -211,7 +211,7 @@ void check_transhuge_cooling(void *arg, struct page *page, bool locked)
 		cur_idx = meta_page->total_accesses;
 		cur_idx = get_idx(cur_idx);
 		memcg->hotness_hg[cur_idx] += HPAGE_PMD_NR;
-		// forget to memcg->ebp_hotness_hg[prev_idx] -= HPAGE_PMD_NR ?
+		// forget to memcg->hotness_hg[prev_idx] -= HPAGE_PMD_NR ?
 		meta_page->idx = cur_idx;
 
 		/* updates skewness */
@@ -272,7 +272,9 @@ void check_base_cooling(pginfo_t *pginfo, struct page *page, bool locked)
 
 		cur_idx = get_idx(pginfo->total_accesses);
 		memcg->hotness_hg[cur_idx]++;
+		// forget to memcg->hotness_hg[prev_idx]-- ?
 		memcg->ebp_hotness_hg[cur_idx]++;
+		// forget to memcg->ebp_hotness_hg[prev_idx]-- ?
 
 		pginfo->cooling_clock = memcg_cclock;
 	} else
@@ -906,10 +908,11 @@ static void update_base_page(struct vm_area_struct *vma, struct page *page,
 	else if (!PageActive(page) && hot)
 		move_page_to_active_lru(page);
 
-	if (hot)
-		move_page_to_active_lru(page);
-	else if (PageActive(page))
-		move_page_to_inactive_lru(page);
+	// additional code? original authors may forget to comment codes below
+	// if (hot)
+	// 	move_page_to_active_lru(page);
+	// else if (PageActive(page))
+	// 	move_page_to_inactive_lru(page);
 }
 
 static void update_huge_page(struct vm_area_struct *vma, pmd_t *pmd,
