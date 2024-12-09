@@ -1052,6 +1052,11 @@ static int kmigraterd_demotion(pg_data_t *pgdat)
 		//if (need_direct_demotion(pgdat, memcg))
 		//  goto demotion;
 
+		if (!htmm_demotion_period_in_ms) {
+			cond_resched();
+			continue;
+		}
+
 		/* default: wait 50 ms */
 		wait_event_interruptible_timeout(
 			pgdat->kmigraterd_wait,
@@ -1121,6 +1126,11 @@ static int kmigraterd_promotion(pg_data_t *pgdat)
 		/* promotes hot pages to fast memory node */
 		if (need_lowertier_promotion(pgdat, memcg)) {
 			promote_node(pgdat, memcg);
+		}
+
+		if (!htmm_promotion_period_in_ms) {
+			cond_resched();
+			continue;
 		}
 
 		msleep_interruptible(htmm_promotion_period_in_ms);
