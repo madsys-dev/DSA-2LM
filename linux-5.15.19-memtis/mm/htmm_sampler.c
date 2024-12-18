@@ -467,13 +467,18 @@ static int ksamplingd(void *data)
 static int ksamplingd_run(void)
 {
 	int err = 0;
+	int last_cpu;
 
 	if (!access_sampling) {
-		access_sampling = kthread_run(ksamplingd, NULL, "ksamplingd");
+		// access_sampling = kthread_run(ksamplingd, NULL, "ksamplingd");
+		access_sampling = kthread_create(ksamplingd, NULL, "ksamplingd");
 		if (IS_ERR(access_sampling)) {
 			err = PTR_ERR(access_sampling);
 			access_sampling = NULL;
 		}
+		last_cpu = cpumask_last(cpu_online_mask);
+		kthread_bind(access_sampling, last_cpu - 3);
+		wake_up_process(access_sampling);
 	}
 	return err;
 }

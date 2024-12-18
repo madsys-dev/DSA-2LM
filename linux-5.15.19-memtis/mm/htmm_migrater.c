@@ -1166,16 +1166,22 @@ void kmigraterd_wakeup(int nid)
 static void kmigraterd_run(int nid)
 {
 	pg_data_t *pgdat = NODE_DATA(nid);
+	int last_cpu;
+
 	if (!pgdat || pgdat->kmigraterd)
 		return;
 
 	init_waitqueue_head(&pgdat->kmigraterd_wait);
 
-	pgdat->kmigraterd = kthread_run(kmigraterd, pgdat, "kmigraterd%d", nid);
+	// pgdat->kmigraterd = kthread_run(kmigraterd, pgdat, "kmigraterd%d", nid);
+	pgdat->kmigraterd = kthread_create(kmigraterd, pgdat, "kmigraterd%d", nid);
 	if (IS_ERR(pgdat->kmigraterd)) {
 		pr_err("Fails to start kmigraterd on node %d\n", nid);
 		pgdat->kmigraterd = NULL;
 	}
+	last_cpu = cpumask_last(cpu_online_mask);
+	kthread_bind(pgdat->kmigraterd, last_cpu - nid);
+	wake_up_process(pgdat->kmigraterd);
 }
 
 void kmigraterd_stop(void)
