@@ -1226,7 +1226,14 @@ static bool __cooling(struct mm_struct *mm, struct mem_cgroup *memcg)
 
 	reset_memcg_stat(memcg);
 	memcg->cooling_clock++;
-	memcg->bp_active_threshold--;
+	if (memcg->bp_active_threshold > 0)
+		memcg->bp_active_threshold--;
+	if (memcg->active_threshold > 0) {
+		// printk("thres: %d -> %d\n", memcg->active_threshold, memcg->active_threshold - 1);
+		memcg->active_threshold--;
+	}
+	if (memcg->warm_threshold > 0)
+		memcg->warm_threshold--;
 	memcg->cooled = true;
 	smp_mb();
 	spin_unlock(&memcg->access_lock);
@@ -1258,7 +1265,7 @@ static void __adjust_active_threshold(struct mm_struct *mm,
 	if (idx_hot != 15)
 		idx_hot++;
 
-	if (nr_active < (max_nr_pages * 75 / 100))
+	if (nr_active < (max_nr_pages * 90 / 100))
 		need_warm = true;
 
 	/* for the estimated base page histogram */
@@ -1283,9 +1290,9 @@ static void __adjust_active_threshold(struct mm_struct *mm,
 	/* some pages may not be reflected in the histogram when cooling happens */
 	if (memcg->cooled) {
 		/* when cooling happens, thres will be current - 1 */
-		if (idx_hot < memcg->active_threshold)
-			if (memcg->active_threshold > 1)
-				memcg->active_threshold--;
+		// if (idx_hot < memcg->active_threshold)
+		// 	if (memcg->active_threshold > 1)
+		// 		memcg->active_threshold--;
 		if (idx_bp < memcg->bp_active_threshold)
 			memcg->bp_active_threshold = idx_bp;
 

@@ -958,7 +958,7 @@ static bool cooling_page_one(struct page *page, struct vm_area_struct *vma,
 		hca->memcg->hotness_hg[cur_idx]++;
 		hca->memcg->ebp_hotness_hg[cur_idx]++;
 
-		if (cur_idx >= (hca->memcg->active_threshold - 1))
+		if (cur_idx >= hca->memcg->active_threshold)
 		    hca->page_is_hot = 2;
 		else
 		    hca->page_is_hot = 1;
