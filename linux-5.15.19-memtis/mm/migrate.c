@@ -262,6 +262,7 @@ static bool remove_migration_pte(struct page *page, struct vm_area_struct *vma,
 	struct page *new;
 	pte_t pte;
 	swp_entry_t entry;
+	struct mem_cgroup *memcg = page_memcg(compound_head(page));
 
 	VM_BUG_ON_PAGE(PageTail(page), page);
 	while (page_vma_mapped_walk(&pvmw)) {
@@ -280,7 +281,8 @@ static bool remove_migration_pte(struct page *page, struct vm_area_struct *vma,
 		}
 #endif
 #ifdef CONFIG_HTMM
-		if (rmap_walk_arg->unmap_clean && try_to_unmap_clean(&pvmw, new))
+		if (memcg && memcg->htmm_enabled && 
+			rmap_walk_arg->unmap_clean && try_to_unmap_clean(&pvmw, new))
 		    continue;
 #endif
 		get_page(new);
