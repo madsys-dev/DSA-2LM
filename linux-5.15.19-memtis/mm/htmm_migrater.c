@@ -163,7 +163,7 @@ static bool need_toptier_demotion(pg_data_t *pgdat, struct mem_cgroup *memcg,
 		else
 			*nr_exceeded = nr_lru_pages + fasttier_max_watermark -
 				       max_nr_pages;
-		*nr_exceeded += 1U * 128 * 100; // 100 MB
+		*nr_exceeded += 1U * 256 * 512; // 512 MB
 		return true;
 	}
 
