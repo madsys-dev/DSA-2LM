@@ -569,7 +569,7 @@ retry:
                 idxd_desc[j][t].hw->dst_addr = page_to_phys(to[i]) + j * page_offset;
                 idxd_desc[j][t].hw->xfer_size = page_offset;
                 idxd_desc[j][t].completion->status = DSA_COMP_NONE;
-                idxd_desc[i][0].hw->flags = IDXD_OP_FLAG_CRAV | IDXD_OP_FLAG_RCR;
+                idxd_desc[j][t].hw->flags = IDXD_OP_FLAG_CRAV | IDXD_OP_FLAG_RCR;
 
                 if (dsa_async_mode) {
                     init_completion(&done[j][t]);
