@@ -1226,9 +1226,9 @@ static bool __cooling(struct mm_struct *mm, struct mem_cgroup *memcg)
 
 	reset_memcg_stat(memcg);
 	memcg->cooling_clock++;
-	if (memcg->bp_active_threshold > 0)
+	if (memcg->bp_active_threshold > 1)
 		memcg->bp_active_threshold--;
-	if (memcg->active_threshold > 0) {
+	if (memcg->active_threshold > 1) {
 		// printk("thres: %d -> %d\n", memcg->active_threshold, memcg->active_threshold - 1);
 		memcg->active_threshold--;
 	}
