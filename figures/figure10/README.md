@@ -1,0 +1,2 @@
+1. cpu_copy_page_lists 表示纯 CPU（copy_pages），mix_copy_page_lists 表示用 CPU 拷贝 4KB 的页，DSA 8 channel 并行拷贝 2MB 大页，dsa_copy_page_lists 代表我们的最终实现，将 Multi-channel 和 Batch Processing 融为一体，对于一个 List 中 4KB 基页和 2MB THP 的混合页面场景，也能够统一高效地处理，并自动负载均衡。具体实现细节请参考代码。
+2. workload-a 代表一个 list 中有 1024 个页，其中 1 个页是大页（这在真实系统中是比较常见合理的，大页不会一次性迁移多个）；workload-b 代表一个 list 中有 1024 个页，其中 24 个页是大页（这是一个构造的比较耗时的极端场景）。
