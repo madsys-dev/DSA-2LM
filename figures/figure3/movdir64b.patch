@@ -1,0 +1,51 @@
+diff --git a/src/cpu.c b/src/cpu.c
+index 8dae590..1c54f3f 100644
+--- a/src/cpu.c
++++ b/src/cpu.c
+@@ -10,6 +10,7 @@
+ #include "common.h"
+ #include "util.h"
+ #include "cpu.h"
++#include "dsa.h"
+ 
+ static inline void
+ cmpval(char *buf, uint64_t len)
+@@ -75,6 +76,18 @@ ap_delta(char *dst, struct delta_rec *delta, uint32_t delta_len)
+ 		p[delta[i].off] = delta[i].val;
+ }
+ 
++static inline void
++memcpy_movdir64b(char *dst, char *src, size_t len) {
++	len = len - len % 64;
++	while (len > 0) {
++		// _movdir64b(dst, src);
++		movdir64b(dst, src);
++		dst += 64, src += 64;
++		len -= 64;
++	}
++	_mm_sfence();
++}
++
+ void
+ test_memcpy(struct tcfg_cpu *tcpu)
+ {
+@@ -112,7 +125,8 @@ test_memcpy(struct tcfg_cpu *tcpu)
+ 				break;
+ 
+ 			case DSA_OPCODE_MEMMOVE:
+-				memcpy(dst, src, tcfg->blen);
++				// memcpy(dst, src, tcfg->blen);
++				memcpy_movdir64b(dst, src, tcfg->blen);
+ 				break;
+ 
+ 			case DSA_OPCODE_CR_DELTA:
+@@ -169,7 +183,8 @@ test_memcpy(struct tcfg_cpu *tcpu)
+ 
+ 			switch (tcfg->op) {
+ 			case DSA_OPCODE_MEMMOVE:
+-				memcpy(dst, src, tcfg->blen);
++				// memcpy(dst, src, tcfg->blen);
++				memcpy_movdir64b(dst, src, tcfg->blen);
+ 				break;
+ 
+ 			case DSA_OPCODE_MEMFILL:
