@@ -1,3 +1,6 @@
 [submodule "dsa-perf-micros"]
 	path = dsa-perf-micros
 	url = https://github.com/intel/dsa-perf-micros
+[submodule "idxd-config"]
+	path = idxd-config
+	url = https://github.com/intel/idxd-config.git
