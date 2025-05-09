@@ -20,7 +20,7 @@ T.B.D
 
 ## Usage
 
-### Download the code
+### Download the Code
 
 ```sh
 git clone https://github.com/madsys-dev/DSA-2LM.git
@@ -28,7 +28,7 @@ cd DSA-2LM
 git submodule update --init --recursive
 ```
 
-### Compiling the code
+### Compiling the Code
 
 #### Compile accel-config
 
@@ -62,6 +62,13 @@ cd dsa-perf-micros
 make
 ```
 
+#### Compile userspace
+
+```sh
+cd userspace
+make
+```
+
 #### Compile kernels with DSA
 
 Enable IOMMU and IDXD modules in kernel configuration:
@@ -77,7 +84,7 @@ CONFIG_INTEL_IDXD_SVM=y
 CONFIG_INTEL_IDXD_PERFMON=y
 ```
 
-⚠️ Based on our experience, Intel DSA may not work properly under the default 4-level page table. We recommend enabling 5-level page table support via: `Processor type and features -> Enable 5-level page tables support`。
+⚠️ Based on our practical experience, Intel DSA may not work properly under the default 4-level page table. We recommend enabling 5-level page table support via: `Processor type and features -> Enable 5-level page tables support`。
 
 💡 We have provided kernel config files for both MEMTIS and TPP kernels. You can use them as a starting point for building your own kernel.
 
@@ -99,7 +106,7 @@ make install
 
 Once the kernel is installed, the system’s default boot kernel will be updated. You may refer to the "Switch a kernel" section to boot into your desired kernel.
 
-### Switch a kernel
+### Switch a Kernel
 
 If you need to switch a kernel version, please use the following script and follow the prompts in the terminal.
 
@@ -144,6 +151,14 @@ Then you need to:
 reboot
 ```
 
+💡 For artifact evaluation, we have pre-installed three kernels for your convenience: **the vanilla 6.4.16, MEMTIS-with-DSA, and TPP-with-DSA** (hereafter referred to as TPP and MEMTIS, respectively). These correspond to options `6.4.16-export+`, `5.15.19-htmm-dsa`, and `5.13.0-rc6tpp-dsa` in the available kernel list above.
+
+## Install Benchmarks
+
+Please read `userspace/bench_dir/README.md` for detailed steps.
+
+💡 For artifact evaluation, we have pre-installed all needed benchmarks and paths in `userspace/bench_cmds` are correct. So you can skip this step. 
+
 ## Reproducing Steps
 
 We provide the necessary code and scripts to reproduce Figures 3–6, 10, and 13–14.
@@ -153,16 +168,29 @@ We provide the necessary code and scripts to reproduce Figures 3–6, 10, and 13
 💡 For artifact evaluation, please refer to the *Switch a kernel* section to boot into the `6.4.16-export+` kernel with 6.x support.
 
 
-For Python scripts, you need a Python 3.11.8 environment with matplotlib installed.
+For python scripts, you need a Python 3.11.8 environment with `matplotlib` installed.
 
 💡 For artifact evaluation, you could directly use our python environment via `conda activate matplotlib`.
 
+### Initialize
+
+Before proceeding with the following reproduction steps, please initialize the system first.
+
+⚠️ This step must be performed every time the system is rebooted.
+
+```sh
+cd scripts
+# For 6.x kernel
+./init_6.x.sh
+# For TPP/MEMTIS kernel
+./init_5.x.sh
+```
 
 ### Figure 3
 
 Reproducing Figure 3 involves two steps. The first run generates results for DSA and `memcpy`. Then, after modifying the source code, a second run will generate results for SIMD (`movdir64b`).
 
-First, copy the scripts into the `dsa-perf-micros` directory:
+First, copy the scripts into the `dsa-perf-micros` directory,
 
 ```sh
 cp figures/figure3/run-dsa-perf-micro*.sh dsa-perf-micros
@@ -205,7 +233,7 @@ T.B.D
 
 ### Figure 5-6
 
-The following three test scripts take approximately 9s + 9s + 1min35s (total about 2min). The raw results will be saved in the `figures/figure5-6/results` directory:
+The following three test scripts take approximately 9s + 9s + 1min 35s (total about 2 minutes). The raw results will be saved in the `figures/figure5-6/results` directory,
 
 ```sh
 cd figure5-6
@@ -225,14 +253,14 @@ Please refer to `batch_size.{csv, png}` and `channel.{csv, png}` in the `figures
 
 ### Figure 10
 
-This test script takes approximately 1.5 minutes to complete. The raw results are stored in the `figures/figure10/results` directory:
+This test script takes approximately 1.5 minutes to complete. The raw results are stored in the `figures/figure10/results` directory,
 
 ```sh
 cd figure10
 ./dsa_test.sh
 ```
 
-Then convert the raw results into CSV format:
+Then convert the raw results into CSV format,
 
 ```sh
 python3 ./convert_to_csv.py
@@ -240,4 +268,46 @@ python3 ./convert_to_csv.py
 
 ### Figure 13-14
 
-T.B.D
+⚠️ Note that MEMTIS and TPP limit fast-tier memory size in different ways.  For **TPP**, you need to add `GRUB_CMDLINE_LINUX="memmap=nn[KMG]!ss[KMG]"` in `/etc/default/grub` file. For more details, you may check [this link](https://pmem.io/blog/2016/02/how-to-emulate-persistent-memory/). Note that after modifying `/etc/default/grub`, you must regenerate the GRUB configuration using `grub2-mkconfig -o /boot/efi/EFI/alinux/grub.cfg` and reboot. For **MEMTIS**, there is no need to impose a global memory limit. MEMTIS constrains appropriate fast-tier memory capacity according to workload configuration via *cgroup*. Please ensure fast-tier memory is sufficient.
+
+The raw results for real-world workloads are saved in the `userspace/results` directory.
+ **Remember to reinitialize the system after switching a kernel.**
+
+Limit the fast-tier memory to **16 GB** and switch to the **TPP** kernel to reproduce the **upper-left** part of Figure 13. This test takes approximately ?? minutes.
+
+```sh
+cd userspace
+./run-fig13-tpp-16G.sh
+```
+
+Limit the fast-tier memory to **32 GB** and switch to the **TPP** kernel to reproduce the **upper-right** part of Figure 13. This test takes approximately ?? minutes.
+
+```sh
+cd userspace
+./run-fig13-tpp-32G.sh
+```
+
+**Remove the fast-tier memory limit** and switch to the **MEMTIS** kernel to reproduce the **bottom** part of Figure 13. This test takes approximately ?? minutes.
+
+```sh
+cd userspace
+./run-fig13-memtis-1_2.sh
+./run-fig13-memtis-1_16.sh
+```
+
+Summarize the results and convert them to CSV format. You can find the test results in `results.csv`,
+
+```sh
+python3 ./convert_results_to_csv.py ./results
+```
+
+Before reproducing Figure 14,  you may rename the `results` folder and `results.csv` to avoid confusion with the results of Figure 14. Of course, you can choose not to do this, so that `results.csv` will contain all the test results of Figure 13-14, and you can distinguish different workload configurations through the `workload_config` field in `results.csv`.
+
+**Remove the fast-tier memory limit** and switch to the **MEMTIS** kernel to reproduce Figure 14. This test takes approximately ?? minutes.
+
+```sh
+cd userspace
+./run-fig14.sh
+```
+
+Summarize the results and convert them to CSV format. You can find the test results in `results.csv`.
