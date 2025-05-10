@@ -229,7 +229,21 @@ You can find the final results in `figures/figure3/data.csv`.
 
 ### Figure 4
 
-T.B.D
+The script will take approximately 20 seconds. The raw results will be saved in `figures/figure4/results`.
+
+```sh
+cd figure4
+./dsa_test_bandwidth.sh
+```
+
+Then, convert the results into CSV format and draw the figure,
+
+```sh
+python3 ./convert_to_csv.py
+python3 ./draw_figure.py
+```
+
+See `figures/figure4/channel.{csv, png}`.
 
 ### Figure 5-6
 
