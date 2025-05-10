@@ -153,6 +153,46 @@ reboot
 
 💡 For artifact evaluation, we have pre-installed three kernels for your convenience: **the vanilla 6.4.16, MEMTIS-with-DSA, and TPP-with-DSA** (hereafter referred to as TPP and MEMTIS, respectively). These correspond to options `6.4.16-export+`, `5.15.19-htmm-dsa`, and `5.13.0-rc6tpp-dsa` in the available kernel list above.
 
+### sysAPI Interface
+
+Several sysAPI interfaces are exposed under `/proc/sys/vm/` for configuration. Detailed descriptions are as follows:
+
+- `cpu_multi_copy_pages`: Enable CPU multi-thread page copying.
+- `limit_mt_num`: Set the number of threads used for CPU multi-threaded page copying.
+- `use_concur_to_compact`: Enable concurrent memory compaction.
+- `use_concur_to_demote`: Enable concurrent page demotion (TPP only).
+   *Note: TPP performs page promotion on-demand via page faults, so concurrent promotion is not applicable.*
+- `use_concur_for_htmm`: Enable concurrent page promotion/demotion (MEMTIS only).
+- `dsa_state`:
+  - `0 -> 1`: Request and initialize DSA for page migration
+  - `1 -> 0`: Release DSA resources
+- `use_dsa_copy_pages`: Enable using DSA for page copying.
+   *Note: You must first set `dsa_state` before enabling `use_dsa_copy_pages`, and reverse the order when disabling.*
+- `limit_chans`: Specify the number of DSA devices used for page migration.
+- `dsa_copy_threshold`: Use DSA for page migration only when the number of 4KB pages in a single operation exceeds this threshold.
+
+Additionally, `/proc/timer` is used to collect statistics related to page migration:
+
+```sh
+# echo 0 > /proc/timer # if timer is already enabled
+echo 1 > /proc/timer # clear previous data and enable the timer
+# after running the workload
+echo 0 > /proc/timer # stop the timer
+cat /proc/timer # retrieve migration statistics
+```
+
+Example output:
+
+```
+# cat /proc/timer
+timer_state = 0 total_time = 255ms last_time = 22281ns last_cnt = 512 dsa_hpage_cnt = 9797 dsa_bpage_cnt = 0 dsa_copy_fail = 0 hpage_cnt = 0 bpage_cnt = 3385897
+```
+
+The output fields from left to right indicate:
+ current timer state, total page copy time, duration of the last page copy, number of pages migrated in the last operation (in 4KB units, e.g., 512 usually indicates a THP/HugePage), number of HugePages migrated with DSA, number of base pages (4KB) migrated with DSA, number of failed DSA copy attempts, number of HugePages copied with CPU, number of base pages (4KB) copied with CPU.
+
+💡 These sysAPI interfaces will be automatically configured when running with provided scripts. You can view the statistics from `/proc/timer` either in the terminal stdout or in the log file at `results/{workload_name}/{version}/{ratio}/output.log`.
+
 ## Install Benchmarks
 
 Please read `userspace/bench_dir/README.md` for detailed steps.
@@ -184,6 +224,8 @@ cd scripts
 ./init_6.x.sh
 # For TPP/MEMTIS kernel
 ./init_5.x.sh
+# For TPP kernel
+./disable_cpu.sh 1 # Disable all CPU cores on NUMA node 1
 ```
 
 ### Figure 3
@@ -284,24 +326,30 @@ python3 ./convert_to_csv.py
 
 ⚠️ Note that MEMTIS and TPP limit fast-tier memory size in different ways.  For **TPP**, you need to add `GRUB_CMDLINE_LINUX="memmap=nn[KMG]!ss[KMG]"` in `/etc/default/grub` file. For more details, you may check [this link](https://pmem.io/blog/2016/02/how-to-emulate-persistent-memory/). Note that after modifying `/etc/default/grub`, you must regenerate the GRUB configuration using `grub2-mkconfig -o /boot/efi/EFI/alinux/grub.cfg` and reboot. For **MEMTIS**, there is no need to impose a global memory limit. MEMTIS constrains appropriate fast-tier memory capacity according to workload configuration via *cgroup*. Please ensure fast-tier memory is sufficient.
 
-The raw results for real-world workloads are saved in the `userspace/results` directory.
- **Remember to reinitialize the system after switching a kernel.**
+⚠️ Before running the evaluation for the first time, edit **line 13** in `scripts/run_bench_{memtis, tpp}.sh`, and set the `DIR` variable to the **absolute path** of the `userspace` directory:
 
-Limit the fast-tier memory to **16 GB** and switch to the **TPP** kernel to reproduce the **upper-left** part of Figure 13. This test takes approximately ?? minutes.
+```sh
+###### update DIR!
+DIR=/data2/atc25-dsa2lm-artifact/userspace
+```
+
+The raw results for real-world workloads are saved in the `userspace/results_{memtis, tpp}` directory. **Remember to initialize the system after switching a kernel.**
+
+Limit the fast-tier memory to **16 GB** and switch to the **TPP** kernel to reproduce the **upper-left** part of Figure 13. This test takes approximately **50 minutes**.
 
 ```sh
 cd userspace
 ./run-fig13-tpp-16G.sh
 ```
 
-Limit the fast-tier memory to **32 GB** and switch to the **TPP** kernel to reproduce the **upper-right** part of Figure 13. This test takes approximately ?? minutes.
+Limit the fast-tier memory to **32 GB** and switch to the **TPP** kernel to reproduce the **upper-right** part of Figure 13. This test takes approximately **40 minutes**.
 
 ```sh
 cd userspace
 ./run-fig13-tpp-32G.sh
 ```
 
-**Remove the fast-tier memory limit** and switch to the **MEMTIS** kernel to reproduce the **bottom** part of Figure 13. This test takes approximately ?? minutes.
+**Remove the fast-tier memory limit** and switch to the **MEMTIS** kernel to reproduce the **bottom** part of Figure 13. This test takes approximately **70 minutes**.
 
 ```sh
 cd userspace
@@ -309,19 +357,24 @@ cd userspace
 ./run-fig13-memtis-1_16.sh
 ```
 
-Summarize the results and convert them to CSV format. You can find the test results in `results.csv`,
+Summarize the results and convert them to CSV format. You can find the test results in `results_{memtis, tpp}.csv`,
 
 ```sh
-python3 ./convert_results_to_csv.py ./results
+python3 ./convert_memtis_results_to_csv.py ./results_memtis
+python3 ./convert_tpp_results_to_csv.py ./results_tpp
 ```
 
-Before reproducing Figure 14,  you may rename the `results` folder and `results.csv` to avoid confusion with the results of Figure 14. Of course, you can choose not to do this, so that `results.csv` will contain all the test results of Figure 13-14, and you can distinguish different workload configurations through the `workload_config` field in `results.csv`.
+Before reproducing Figure 14,  you may rename the `results_memtis` folder and `results_memtis.csv` to avoid confusion with the results of Figure 14. Of course, you can choose not to do this, so that `results_memtis.csv` will contain all the test results of Figure 13-14, and you can distinguish different workload configurations through the `workload_config` field in `results_memtis.csv`.
 
-**Remove the fast-tier memory limit** and switch to the **MEMTIS** kernel to reproduce Figure 14. This test takes approximately ?? minutes.
+**Remove the fast-tier memory limit** and switch to the **MEMTIS** kernel to reproduce Figure 14. This test takes approximately **50 minute**s.
 
 ```sh
 cd userspace
 ./run-fig14.sh
 ```
 
-Summarize the results and convert them to CSV format. You can find the test results in `results.csv`.
+Summarize the results and convert them to CSV format. You can find the test results in `results_memtis.csv`.
+
+```sh
+python3 ./convert_memtis_results_to_csv.py ./results_memtis
+```
