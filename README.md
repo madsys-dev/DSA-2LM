@@ -6,17 +6,49 @@ This artifact provides the source code of MEMTIS and TPP kernels, both with DSA 
 
 ## Note
 
-All commands have been tested on Alibaba Cloud Linux 3 with root privileges, where the `sudo` prefix may be omitted. If you are using Ubuntu or other distributions, you may need to change the package management commands accordingly.
+All commands have been tested on Alibaba Cloud Linux 3 with root privileges, where the `sudo` prefix may be omitted. 
 
 ## Prerequisites
 
 ### Hardware requirements
 
-T.B.D
+Intel DSA is typically available on systems equipped with **4th/5th Generation Intel Sapphire Rapids CPU**. Please ensure that the CPU supports Intel DSA. See the [Intel® Built-In Accelerators](https://www.supermicro.com/en/accelerators/intel/built-in-on-demand) for more details.
+
+For tiered memory, our system requires one CPU with **exactly one memory NUMA node and one CPU-less NUMA memory node. We do not support multiple CPU NUMA nodes.** If your system has more than one CPU NUMA node, you can use the provided `scripts/disable_cpu.sh` script to disable the others. As for the memory-only NUMA node, you can use Persistent Memory, CXL Memory (we use an ASIC-based CXL device in our paper), or virtualize such configurations to run our code in virtual machines.
+
+A typical hardware configuration appears as below:
+
+```
+# numactl -H
+available: 2 nodes (0-1)
+node 0 cpus: 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47
+node 0 size: 257617 MB
+node 0 free: 255233 MB
+node 1 cpus:
+node 1 size: 257980 MB
+node 1 free: 256490 MB
+node distances:
+node   0   1
+  0:  10  21
+  1:  21  10
+```
 
 ### Software requirements
 
-T.B.D
+We compiled our code and performed the evaluation on Alibaba Cloud Linux 3. If you are using Ubuntu or other distributions, you may need to change the package management commands accordingly.
+
+```sh
+# To compile the kernels
+yum install binutils ncurses-devel \
+    /usr/include/{libelf.h,openssl/pkcs7.h} \
+    /usr/bin/{bc,bison,flex,gcc,git,gpg2,gzip,make,openssl,pahole,perl,rsync,tar,xz,zstd}
+# To install libnuma
+yum install numactl numactl-devel numactl-libs
+```
+
+We also require `libaccel-config >= 4.1.6` to use Intel DSA. The version available from the system package manager might be outdated. We recommend building and installing `libaccel-config` from source as described in the next section.
+
+⭐️⭐️⭐️ For artifact evaluation, we can provide you temporary access to a bare-metal Alibaba Cloud instance with two DRAM NUMA nodes. For some reasons and constraints, we are sorry that we are unable to provide a CXL cloud testbed. As a result, some reproduction results may differ from those in our paper. Please feel free to contact us if you need the instance.
 
 ## Usage
 
@@ -191,7 +223,7 @@ timer_state = 0 total_time = 255ms last_time = 22281ns last_cnt = 512 dsa_hpage_
 The output fields from left to right indicate:
  current timer state, total page copy time, duration of the last page copy, number of pages migrated in the last operation (in 4KB units, e.g., 512 usually indicates a THP/HugePage), number of HugePages migrated with DSA, number of base pages (4KB) migrated with DSA, number of failed DSA copy attempts, number of HugePages copied with CPU, number of base pages (4KB) copied with CPU.
 
-💡 These sysAPI interfaces will be automatically configured when running with provided scripts. You can view the statistics from `/proc/timer` either in the terminal stdout or in the log file at `results/{workload_name}/{version}/{ratio}/output.log`.
+💡 These sysAPI interfaces will be automatically configured when running with provided scripts. You can view the statistics from `/proc/timer` either in the terminal stdout or in the log file at `results_{memtis, tpp}/{workload_name}/{version}/{ratio}/output.log`.
 
 ## Install Benchmarks
 
@@ -225,7 +257,7 @@ cd scripts
 # For TPP/MEMTIS kernel
 ./init_5.x.sh
 # For TPP kernel
-./disable_cpu.sh 1 # Disable all CPU cores on NUMA node 1
+./disable_cpu.sh 1 # Disable all CPU cores on NUMA node 1. MEMTIS could skip this step because tht promotion/demotion node is hardcoded.
 ```
 
 ### Figure 3
