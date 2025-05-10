@@ -10,8 +10,8 @@ MEM_NODES=($(ls /sys/devices/system/node | grep node | awk -F 'node' '{print $NF
 
 CGROUP_NAME="htmm"
 ###### update DIR!
-DIR=/data2/memtis-userspace
-FlameGraph=/home/FlameGraph
+DIR=/data2/atc25-dsa2lm-artifact/userspace
+FlameGraph=/data2/FlameGraph
 
 CONFIG_PERF=off
 CONFIG_NS=on
@@ -31,7 +31,7 @@ function func_tpp_setting() {
     echo 2 | tee /proc/sys/kernel/numa_balancing
     echo 1 | tee /sys/kernel/mm/numa/demotion_enabled
     swapoff -a
-    echo 200 | tee /proc/sys/vm/demote_scale_factor # 200 -> 1000 -> 2000, 200 is defaut for TPP
+    echo 1000 | tee /proc/sys/vm/demote_scale_factor # 200 -> 1000 -> 2000, 200 is defaut for TPP
 
 	echo 1 | tee /proc/sys/vm/use_concur_to_demote
 	echo 1 | tee /proc/sys/vm/use_concur_to_compact
@@ -71,7 +71,7 @@ function func_main() {
     # make directory for results
     mkdir -p ${DIR}/results_tpp/${BENCH_NAME}/${VER}/${NVM_RATIO}
     LOG_DIR=${DIR}/results_tpp/${BENCH_NAME}/${VER}/${NVM_RATIO}
-	cp ${DIR}/scripts/run_bench_tpp.sh ${LOG_DIR}/run_bench_${DATE}.sh
+	cp ${DIR}/scripts/run_bench_tpp.sh ${LOG_DIR}/run_bench_tpp_${DATE}.sh
 
 
     if [[ "x${CONFIG_PERF}" == "xon" ]]; then

@@ -10,7 +10,8 @@ MEM_NODES=($(ls /sys/devices/system/node | grep node | awk -F 'node' '{print $NF
 
 CGROUP_NAME="htmm"
 ###### update DIR!
-DIR=/data2/memtis-userspace
+DIR=/data2/atc25-dsa2lm-artifact/userspace
+FlameGraph=/data2/FlameGraph
 
 CONFIG_PERF=off
 CONFIG_NS=off
@@ -29,6 +30,7 @@ function func_cache_flush() {
 function func_memtis_setting() {
     echo 199 | tee /sys/kernel/mm/htmm/htmm_sample_period
     echo 100007 | tee /sys/kernel/mm/htmm/htmm_inst_sample_period
+	# echo 201 | tee /sys/kernel/mm/htmm/htmm_inst_sample_period
     echo 1 | tee /sys/kernel/mm/htmm/htmm_thres_hot
     echo 2 | tee /sys/kernel/mm/htmm/htmm_split_period
     # echo 100000 | tee /sys/kernel/mm/htmm/htmm_adaptation_period
@@ -36,10 +38,10 @@ function func_memtis_setting() {
     # echo 2000000 | tee /sys/kernel/mm/htmm/htmm_cooling_period
     echo 200000 | tee /sys/kernel/mm/htmm/htmm_cooling_period
     echo 2 | tee /sys/kernel/mm/htmm/htmm_mode
-    # echo 500 | tee /sys/kernel/mm/htmm/htmm_demotion_period_in_ms
-    echo 0 | tee /sys/kernel/mm/htmm/htmm_demotion_period_in_ms
-    # echo 500 | tee /sys/kernel/mm/htmm/htmm_promotion_period_in_ms
-	echo 0 | tee /sys/kernel/mm/htmm/htmm_promotion_period_in_ms
+    echo 500 | tee /sys/kernel/mm/htmm/htmm_demotion_period_in_ms
+    # echo 0 | tee /sys/kernel/mm/htmm/htmm_demotion_period_in_ms
+    echo 500 | tee /sys/kernel/mm/htmm/htmm_promotion_period_in_ms
+	# echo 0 | tee /sys/kernel/mm/htmm/htmm_promotion_period_in_ms
     echo 4 | tee /sys/kernel/mm/htmm/htmm_gamma
     ###  cpu cap (per mille) for ksampled
     # echo 30 | tee /sys/kernel/mm/htmm/ksampled_soft_cpu_quota
@@ -72,7 +74,7 @@ function func_memtis_setting() {
 function func_prepare() {
     echo "Preparing benchmark start..."
 
-	sudo sysctl kernel.perf_event_max_sample_rate=100000
+	sysctl kernel.perf_event_max_sample_rate=100000
 
 	# disable automatic numa balancing
 	sudo echo 0 > /proc/sys/kernel/numa_balancing
@@ -99,11 +101,18 @@ function func_prepare() {
 }
 
 function func_main() {
-    # ${DIR}/bin/kill_ksampled
+    ${DIR}/bin/kill_ksampled
     TIME="/usr/bin/time"
 
+    # make directory for results
+    mkdir -p ${DIR}/results_memtis/${BENCH_NAME}/${VER}/${NVM_RATIO}
+    LOG_DIR=${DIR}/results_memtis/${BENCH_NAME}/${VER}/${NVM_RATIO}
+	cp ${DIR}/scripts/run_bench_memtis.sh ${LOG_DIR}/run_bench_memtis_${DATE}.sh
+
+
     if [[ "x${CONFIG_PERF}" == "xon" ]]; then
-		PERF="./perf stat -e dtlb_store_misses.walk_pending,dtlb_load_misses.walk_pending,dTLB-store-misses,cycle_activity.stalls_total"
+		# PERF="perf stat -e dtlb_store_misses.walk_pending,dtlb_load_misses.walk_pending,dTLB-store-misses,dTLB-load-misses,cycle_activity.stalls_total"
+		PERF="perf record -o ${LOG_DIR}/perf_${DATE}.data -F 99 -ag -C 44-45,47 --"
     else
 		PERF=""
     fi
@@ -119,28 +128,26 @@ function func_main() {
     echo "${DATE}"
     echo "-----------------------"
 
-    # make directory for results
-    mkdir -p ${DIR}/results/${BENCH_NAME}/${VER}/${NVM_RATIO}
-    LOG_DIR=${DIR}/results/${BENCH_NAME}/${VER}/${NVM_RATIO}
-	cp ${DIR}/scripts/run_bench.sh ${LOG_DIR}/run_bench_${DATE}.sh
-
     # set memcg for htmm
     sudo ${DIR}/scripts/set_htmm_memcg.sh htmm remove
     sudo ${DIR}/scripts/set_htmm_memcg.sh htmm $$ enable
+	echo "Set Memory Size at Node 0"
     sudo ${DIR}/scripts/set_mem_size.sh htmm 0 ${BENCH_DRAM}
+	# echo "Set Memory Size at Node 1"
+	# sudo ${DIR}/scripts/set_mem_size.sh htmm 1 0MB
     sleep 2
 
     # check dram size
-    MAX_DRAM_SIZE=$(numastat -m | awk '$1 == "MemFree" { print int($2) }')
-    if [[ ${BENCH_DRAM::-2} -gt ${MAX_DRAM_SIZE} ]]; then
-	echo "Available DRAM size for ${BENCH_NAME} is only ${MAX_DRAM_SIZE}MB"
-	echo "ERROR: abort -- change the ratio"
-	exit -1
-    fi
+    # MAX_DRAM_SIZE=$(numastat -m | awk '$1 == "MemFree" { print int($2) }')
+    # if [[ ${BENCH_DRAM::-2} -gt ${MAX_DRAM_SIZE} ]]; then
+	# echo "Available DRAM size for ${BENCH_NAME} is only ${MAX_DRAM_SIZE}MB"
+	# echo "ERROR: abort -- change the ratio"
+	# exit -1
+    # fi
 
     # if [[ ${NVM_RATIO} != "1:0" ]]; then
-    #     /root/workspace/cpp/memuse ${BENCH_DRAM} &
-    #     sleep 10
+    # 	/root/workspace/cpp/memuse ${BENCH_DRAM} &
+    # 	sleep 10
     # fi
 
     cat /proc/vmstat | grep -e thp -e htmm -e pgmig >> ${LOG_DIR}/before_vmstat.log 
@@ -148,7 +155,7 @@ function func_main() {
     func_cache_flush
     sleep 2
 
-    ${DIR}/scripts/memory_stat.sh ${LOG_DIR} &
+    # ${DIR}/scripts/memory_stat.sh ${LOG_DIR} &
     echo 0 > /proc/timer
     echo 1 > /proc/timer
 
@@ -162,15 +169,15 @@ function func_main() {
 	    | tee ${LOG_DIR}/output.log
     else
 	${TIME} -f "execution time %e (s)" \
-	    ${PINNING} ${DIR}/bin/launch_bench ${BENCH_RUN} 2>&1 \
+	    ${PINNING} ${PERF} ${DIR}/bin/launch_bench_nopid ${BENCH_RUN} 2>&1 \
 	    | tee -a ${LOG_DIR}/output.log
     fi
 
     echo 0 > /proc/timer
     cat /proc/timer | tee -a ${LOG_DIR}/timer.log
 
-    sudo killall -9 memory_stat.sh
-    # ${DIR}/scripts/kill_memuse.sh
+    # sudo killall -9 memory_stat.sh
+	# ${DIR}/scripts/kill_memuse.sh
     cat /proc/vmstat | grep -e thp -e htmm -e pgmig >> ${LOG_DIR}/after_vmstat.log
     sleep 2
 
@@ -184,21 +191,13 @@ function func_main() {
     fi
 
     sudo dmesg -c >> ${LOG_DIR}/dmesg.txt
-
-	# 动态获取 kmigraterd0 线程的 PID
-    KMIGRATERD_PID=$(grep -w kmigraterd0 /proc/*/comm | grep -oP '\/proc\/\K\d+')
-
-    # 检查是否成功获取 PID
-    if [ -z "$KMIGRATERD_PID" ]; then
-        echo "Failed to find kmigraterd0 PID."
-    else
-        echo "Found kmigraterd0 PID: $KMIGRATERD_PID"
-    fi
-
-	cat /proc/${KMIGRATERD_PID}/move_pages_breakdown | tee -a ${LOG_DIR}/move_pages_breakdown.txt
-
     # disable htmm
     sudo ${DIR}/scripts/set_htmm_memcg.sh htmm $$ disable
+
+	if [[ "x${CONFIG_PERF}" == "xon" ]]; then
+		perf script -i ${LOG_DIR}/perf_${DATE}.data | ${FlameGraph}/stackcollapse-perf.pl > ${LOG_DIR}/out.perf-folded
+		cat ${LOG_DIR}/out.perf-folded | ${FlameGraph}/flamegraph.pl > ${LOG_DIR}/perf-kernel_${DATE}.svg
+	fi
 }
 
 function func_usage() {

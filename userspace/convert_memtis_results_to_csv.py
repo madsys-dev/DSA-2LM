@@ -37,7 +37,7 @@ def main():
     results_folder = sys.argv[1]
     
     header = ["workload_config", "performance"]
-    with open("results2.csv", mode='w') as csvfile:
+    with open("results_memtis.csv", mode='w') as csvfile:
         writer = csv.writer(csvfile)
         writer.writerow(header)
         
@@ -49,7 +49,7 @@ def main():
         if "output.log" not in files:
             continue
         workload = root.strip("./")
-        workload = workload.removeprefix("results")
+        workload = workload.removeprefix("results_memtis")
         workload = workload.strip("/")
         workload_name = workload.split("/")[0]
         ratio = workload.split("/")[-1]
@@ -75,7 +75,7 @@ def main():
             data[workload_name][ratio][method] = []
         data[workload_name][ratio][method].extend(result)
         
-    with open("results.csv", mode='a') as csvfile:
+    with open("results_memtis.csv", mode='a') as csvfile:
         writer = csv.writer(csvfile)
         for workload_name, ratios in data.items():
             for ratio, methods in ratios.items():
