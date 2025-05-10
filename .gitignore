@@ -1,0 +1,5 @@
+*.csv
+*.png
+**/results/
+**/bin/
+userspace/results_*/**
