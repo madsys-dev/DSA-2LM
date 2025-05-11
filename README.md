@@ -14,7 +14,7 @@ All commands have been tested on Alibaba Cloud Linux 3 with root privileges, whe
 
 Intel DSA is typically available on systems equipped with **4th/5th Generation Intel Sapphire Rapids CPU**. Please ensure that the CPU supports Intel DSA. See the [Intel® Built-In Accelerators](https://www.supermicro.com/en/accelerators/intel/built-in-on-demand) for more details.
 
-For tiered memory, our system requires one CPU with **exactly one memory NUMA node and one CPU-less NUMA memory node. We do not support multiple CPU NUMA nodes.** If your system has more than one CPU NUMA node, you can use the provided `scripts/disable_cpu.sh` script to disable the others. As for the memory-only NUMA node, you can use Persistent Memory, CXL Memory (we use an ASIC-based CXL device in our paper), or virtualize such configurations to run our code in virtual machines.
+For tiered memory, our system requires one CPU with **exactly one memory NUMA node and one CPU-less NUMA memory node. We do not support multiple CPU NUMA nodes.** If your system has more than one CPU NUMA node, you can disable the others and leave only one CPU node enabled in the BIOS settings. If your system has exactly two CPU NUMA nodes, you can use the provided `scripts/disable_cpu.sh` script to disable the other. As for the memory-only NUMA node, you can use Persistent Memory, CXL Memory (we use an ASIC-based CXL device in our paper), or virtualize such configurations to run our code in virtual machines.
 
 A typical hardware configuration appears as below:
 
