@@ -39,3 +39,13 @@ vim btree/btree.c
 Follow the README in the [polars-benchmark](https://github.com/pola-rs/polars-benchmark) repository to install. 
 
 Note that we change the scale factor to `10.0` and only run pandas test (i.e., `make run-pandas`).
+
+```sh
+cd polars-benchmark
+patch -p1 < ../polars-benchmark.patch # change scale factor to 10.0 and create run-pandas.sh
+cd tpch-dbgen
+make # build tpch-dbgen
+cd ../
+./run.sh # first run to generate data (i.e, make table)
+./run-pandas.sh # run pandas benchmark
+```

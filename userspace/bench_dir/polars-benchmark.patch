@@ -1,0 +1,258 @@
+From 66f6373a361d09844d97adb341d0901ad27d02ab Mon Sep 17 00:00:00 2001
+From: LRL52 <525687841@qq.com>
+Date: Tue, 27 May 2025 17:44:55 +0800
+Subject: [PATCH 1/4] use conda virtual environment
+
+---
+ .gitignore |  1 +
+ Makefile   | 40 ++++++++++++++++++++--------------------
+ 2 files changed, 21 insertions(+), 20 deletions(-)
+
+diff --git a/.gitignore b/.gitignore
+index a400bca..8468221 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -35,3 +35,4 @@ qgen
+ /data/tables/
+ /output/
+ .env*
++.venv-conda/
+diff --git a/Makefile b/Makefile
+index be3470f..b254d26 100644
+--- a/Makefile
++++ b/Makefile
+@@ -2,24 +2,24 @@
+ 
+ PYTHONPATH=
+ SHELL=/bin/bash
+-VENV=.venv
++VENV=.venv-conda
+ VENV_BIN=$(VENV)/bin
+ 
+-.venv:  ## Set up Python virtual environment and install dependencies
+-	python3 -m venv $(VENV)
+-	$(MAKE) install-deps
++venv:  ## Set up conda virtual environment
++	conda create -p $(VENV) python=3.11.9
+ 
+ .PHONY: install-deps
+-install-deps: .venv  ## Install Python project dependencies
++install-deps:  ## Install Python project dependencies
++	$(VENV_BIN)/python -m pip install --upgrade pip
+ 	$(VENV_BIN)/python -m pip install --upgrade uv
+-	$(VENV_BIN)/uv pip install --compile -r requirements.txt
+-	$(VENV_BIN)/uv pip install --compile -r requirements-dev.txt
++	$(VENV_BIN)/python -m pip install --cofmpile -r requirements.txt
++	$(VENV_BIN)/python -m pip install --compile -r requirements-dev.txt
+ 
+ .PHONY: bump-deps
+-bump-deps: .venv  ## Bump Python project dependencies
++bump-deps:  ## Bump Python project dependencies
+ 	$(VENV_BIN)/python -m pip install --upgrade uv
+-	$(VENV_BIN)/uv pip compile requirements.in > requirements.txt
+-	$(VENV_BIN)/uv pip compile requirements-dev.in > requirements-dev.txt
++	$(VENV_BIN)/python -m pip compile requirements.in > requirements.txt
++	$(VENV_BIN)/python -m pip compile requirements-dev.in > requirements-dev.txt
+ 
+ .PHONY: fmt
+ fmt:  ## Run autoformatting and linting
+@@ -31,7 +31,7 @@ fmt:  ## Run autoformatting and linting
+ pre-commit: fmt  ## Run all code quality checks
+ 
+ .PHONY: tables
+-tables: .venv  ## Generate data tables
++tables:  ## Generate data tables
+ 	$(MAKE) -C tpch-dbgen dbgen
+ 	cd tpch-dbgen && ./dbgen -vf -s $(SCALE_FACTOR) && cd ..
+ 	mkdir -p "data/tables/scale-$(SCALE_FACTOR)"
+@@ -40,41 +40,41 @@ tables: .venv  ## Generate data tables
+ 	rm -rf data/tables/scale-$(SCALE_FACTOR)/*.tbl
+ 
+ .PHONY: run-polars
+-run-polars: .venv  ## Run Polars benchmarks
++run-polars:  ## Run Polars benchmarks
+ 	$(VENV_BIN)/python -m queries.polars
+ 
+ .PHONY: run-duckdb
+-run-duckdb: .venv  ## Run DuckDB benchmarks
++run-duckdb:  ## Run DuckDB benchmarks
+ 	$(VENV_BIN)/python -m queries.duckdb
+ 
+ .PHONY: run-pandas
+-run-pandas: .venv  ## Run pandas benchmarks
++run-pandas:  ## Run pandas benchmarks
+ 	$(VENV_BIN)/python -m queries.pandas
+ 
+ .PHONY: run-pyspark
+-run-pyspark: .venv  ## Run PySpark benchmarks
++run-pyspark:  ## Run PySpark benchmarks
+ 	$(VENV_BIN)/python -m queries.pyspark
+ 
+ .PHONY: run-dask
+-run-dask: .venv  ## Run Dask benchmarks
++run-dask:  ## Run Dask benchmarks
+ 	$(VENV_BIN)/python -m queries.dask
+ 
+ .PHONY: run-modin
+-run-modin: .venv  ## Run Modin benchmarks
++run-modin:  ## Run Modin benchmarks
+ 	$(VENV_BIN)/python -m queries.modin
+ 
+ .PHONY: run-all
+-run-all: run-polars run-duckdb run-pandas run-pyspark run-dask run-modin  ## Run all benchmarks
++run-all: run-polars run-duckdb run-pandas run-dask run-modin  ## Run all benchmarks
+ 
+ .PHONY: plot
+-plot: .venv  ## Plot results
++plot:  ## Plot results
+ 	$(VENV_BIN)/python -m scripts.plot_bars
+ 
+ .PHONY: clean
+ clean:  clean-tpch-dbgen clean-tables  ## Clean up everything
+ 	$(VENV_BIN)/ruff clean
+ 	@rm -rf .mypy_cache/
+-	@rm -rf .venv/
++	# @rm -rf .venv-conda/
+ 	@rm -rf output/
+ 	@rm -rf spark-warehouse/
+ 
+-- 
+2.43.5
+
+
+From de1f6fa21eac658c65a198d85532641a58d34a4e Mon Sep 17 00:00:00 2001
+From: LRL52 <525687841@qq.com>
+Date: Tue, 27 May 2025 17:45:29 +0800
+Subject: [PATCH 2/4] change scale_factor to 10.0
+
+---
+ settings.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/settings.py b/settings.py
+index 36333ee..ba5d0b6 100644
+--- a/settings.py
++++ b/settings.py
+@@ -59,7 +59,7 @@ class Plot(BaseSettings):
+ 
+ 
+ class Settings(BaseSettings):
+-    scale_factor: float = 1.0
++    scale_factor: float = 10.0
+ 
+     paths: Paths = Paths()
+     plot: Plot = Plot()
+-- 
+2.43.5
+
+
+From 38254821c9431b33b8278e24c5edd7864e794c02 Mon Sep 17 00:00:00 2001
+From: LRL52 <525687841@qq.com>
+Date: Tue, 27 May 2025 17:46:09 +0800
+Subject: [PATCH 3/4] add png format for plot
+
+---
+ scripts/plot_bars.py | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/scripts/plot_bars.py b/scripts/plot_bars.py
+index ea91713..5f0fd76 100644
+--- a/scripts/plot_bars.py
++++ b/scripts/plot_bars.py
+@@ -223,6 +223,15 @@ def write_plot_image(fig: Any) -> None:
+ 
+     fig.write_html(path / file_name)
+ 
++    # Save as PNG with custom width and height
++    file_name_png = f"plot-io-{settings.run.io_type}.png"
++    print(path / file_name_png)
++    
++    # Define custom width and height (in pixels)
++    custom_width = 1200  # Increase this value for wider images
++    custom_height = 800  # Adjust height as necessary
++    
++    fig.write_image(path / file_name_png, format="png", width=custom_width, height=custom_height, scale=2)
+ 
+ if __name__ == "__main__":
+     main()
+-- 
+2.43.5
+
+
+From 681b2c369b2c25f95ead62d0ce317ce9060757d7 Mon Sep 17 00:00:00 2001
+From: LRL52 <525687841@qq.com>
+Date: Tue, 27 May 2025 17:46:34 +0800
+Subject: [PATCH 4/4] add run scripts
+
+---
+ run-modin.sh  | 19 +++++++++++++++++++
+ run-pandas.sh | 19 +++++++++++++++++++
+ run.sh        |  2 +-
+ 3 files changed, 39 insertions(+), 1 deletion(-)
+ create mode 100755 run-modin.sh
+ create mode 100755 run-pandas.sh
+
+diff --git a/run-modin.sh b/run-modin.sh
+new file mode 100755
+index 0000000..9a42e3d
+--- /dev/null
++++ b/run-modin.sh
+@@ -0,0 +1,19 @@
++export RUN_LOG_TIMINGS=1
++export SCALE_FACTOR=10.0
++# export SCALE_FACTOR=1.0
++
++cd /home/polars-benchmark || exit
++
++# conda init
++# conda activate ./.venv-conda
++
++# echo run with cached IO
++# make tables
++# make run-all
++make run-modin
++# make plot
++
++# echo run with IO
++# export RUN_INCLUDE_IO=1
++# make run-all
++# make plot
+diff --git a/run-pandas.sh b/run-pandas.sh
+new file mode 100755
+index 0000000..4ea3dbe
+--- /dev/null
++++ b/run-pandas.sh
+@@ -0,0 +1,19 @@
++export RUN_LOG_TIMINGS=1
++export SCALE_FACTOR=10.0
++# export SCALE_FACTOR=1.0
++
++cd /home/polars-benchmark || exit
++
++# conda init
++# conda activate ./.venv-conda
++
++# echo run with cached IO
++# make tables
++# make run-all
++make run-pandas
++# make plot
++
++# echo run with IO
++# export RUN_INCLUDE_IO=1
++# make run-all
++# make plot
+diff --git a/run.sh b/run.sh
+index aaa0f36..88116ef 100755
+--- a/run.sh
++++ b/run.sh
+@@ -1,5 +1,5 @@
+ export RUN_LOG_TIMINGS=1
+-export SCALE_FACTOR=1.0
++export SCALE_FACTOR=10.0
+ 
+ echo run with cached IO
+ make tables
+-- 
+2.43.5
+
