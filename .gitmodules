@@ -4,3 +4,6 @@
 [submodule "idxd-config"]
 	path = idxd-config
 	url = https://github.com/intel/idxd-config.git
+[submodule "userspace/bench_dir/polars-benchmark"]
+	path = userspace/bench_dir/polars-benchmark
+	url = https://github.com/pola-rs/polars-benchmark.git
