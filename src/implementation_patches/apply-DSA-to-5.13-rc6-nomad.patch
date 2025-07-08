@@ -1,0 +1,2340 @@
+From 918894f0d3ddc40407a9b99f90dce7ebcd99a899 Mon Sep 17 00:00:00 2001
+From: LRL52 <525687841@qq.com>
+Date: Tue, 27 May 2025 15:55:43 +0800
+Subject: [PATCH] apply DSA to Nomad
+
+---
+ drivers/misc/Makefile            |   1 +
+ drivers/misc/experiment/Makefile |   2 +
+ drivers/misc/experiment/exp.c    | 788 +++++++++++++++++++++++++++++++
+ drivers/misc/experiment/exp.h    |  30 ++
+ fs/proc/proc_sysctl.c            |   2 +-
+ include/linux/highmem.h          |   7 +
+ include/linux/migrate.h          |   7 +
+ include/linux/nomad2.h           |   6 +-
+ include/linux/sched.h            |  29 ++
+ include/linux/sysctl.h           |   4 +
+ include/trace/events/migrate.h   |   9 +-
+ kernel/sysctl.c                  |  85 ++++
+ mm/Kconfig                       |   6 +
+ mm/Makefile                      |   1 +
+ mm/compaction.c                  |  13 +-
+ mm/copy_page.c                   | 248 ++++++++++
+ mm/internal.h                    |   4 +
+ mm/migrate.c                     | 766 +++++++++++++++++++++++++++++-
+ 18 files changed, 1988 insertions(+), 20 deletions(-)
+ create mode 100644 linux-5.13-rc6-nomad/drivers/misc/experiment/Makefile
+ create mode 100644 linux-5.13-rc6-nomad/drivers/misc/experiment/exp.c
+ create mode 100644 linux-5.13-rc6-nomad/drivers/misc/experiment/exp.h
+ create mode 100644 linux-5.13-rc6-nomad/mm/copy_page.c
+
+diff --git a/drivers/misc/Makefile b/drivers/misc/Makefile
+index e92a56d44..cbfd49bce 100644
+--- a/drivers/misc/Makefile
++++ b/drivers/misc/Makefile
+@@ -57,3 +57,4 @@ obj-$(CONFIG_HABANA_AI)		+= habanalabs/
+ obj-$(CONFIG_UACCE)		+= uacce/
+ obj-$(CONFIG_XILINX_SDFEC)	+= xilinx_sdfec.o
+ obj-$(CONFIG_HISI_HIKEY_USB)	+= hisi_hikey_usb.o
++obj-y				+= experiment/
+diff --git a/drivers/misc/experiment/Makefile b/drivers/misc/experiment/Makefile
+new file mode 100644
+index 000000000..d1cc56dd2
+--- /dev/null
++++ b/drivers/misc/experiment/Makefile
+@@ -0,0 +1,2 @@
++# Author: LRL52
++obj-y += exp.o
+\ No newline at end of file
+diff --git a/drivers/misc/experiment/exp.c b/drivers/misc/experiment/exp.c
+new file mode 100644
+index 000000000..3e3073bff
+--- /dev/null
++++ b/drivers/misc/experiment/exp.c
+@@ -0,0 +1,788 @@
++// Author: LRL52
++#include <linux/export.h>
++#include <linux/kthread.h>
++#include "linux/preempt.h"
++#include "linux/sched.h"
++#include <linux/module.h>
++#include <linux/dmaengine.h>
++#include <linux/dma-mapping.h>
++#include <linux/init.h>
++#include <linux/slab.h>
++#include <linux/delay.h>
++#include <linux/proc_fs.h>
++#include <linux/seq_file.h>
++#include <linux/sysctl.h>
++#include <linux/idxd.h>
++
++#include "../../dma/idxd/idxd.h"
++#include "exp.h"
++
++#define PROC_FILENAME "timer"
++#define MAX_CHAN 8
++#define MAX_BATCH_SIZE 128 // should lower or equal to 128, because two pages can only allocate 128 dsa_hw_desc(s)
++#define MAX_IDXD_DESC 25 // one page can only allocate 25 idxd_desc(s)
++#define MAX_HPAGE_NR (MAX_IDXD_DESC - 1)
++#define MAX_BPAGE_NR (MAX_CHAN * MAX_BATCH_SIZE)
++#define POLL_RETRY_MAX 100000000
++
++ktime_t total_time, last_time;
++atomic_long_t dsa_copy_fail, hpage_cnt, bpage_cnt, dsa_hpage_cnt, dsa_bpage_cnt;
++unsigned long last_cnt;
++int dsa_copy_threshold = 16;
++int timer_state, dsa_state, use_dsa_copy_pages, dsa_async_mode, dsa_sync_mode;
++// int max_hpage_cnt, max_bpage_cnt;
++int limit_chans = MAX_CHAN;
++DEFINE_SPINLOCK(timer_lock);
++
++EXPORT_SYMBOL(total_time);
++EXPORT_SYMBOL(last_time);
++EXPORT_SYMBOL(dsa_copy_fail);
++EXPORT_SYMBOL(hpage_cnt);
++EXPORT_SYMBOL(bpage_cnt);
++EXPORT_SYMBOL(dsa_hpage_cnt);
++EXPORT_SYMBOL(dsa_bpage_cnt);
++EXPORT_SYMBOL(last_cnt);
++EXPORT_SYMBOL(timer_state);
++EXPORT_SYMBOL(dsa_state);
++EXPORT_SYMBOL(use_dsa_copy_pages);
++EXPORT_SYMBOL(dsa_copy_threshold);
++EXPORT_SYMBOL(dsa_async_mode);
++EXPORT_SYMBOL(dsa_sync_mode);
++// EXPORT_SYMBOL(max_bpage_cnt);
++// EXPORT_SYMBOL(max_hpage_cnt);
++EXPORT_SYMBOL(limit_chans);
++EXPORT_SYMBOL(timer_lock);
++
++#define USE_PER_CPU_VARIABLES
++// #define TIMER_ENABLE
++
++#ifdef TIMER_ENABLE
++#define TIMER_ON(name) uint64_t start_##name = rdtsc()
++#define TIMER_OFF(name) uint64_t end_##name = rdtsc()
++#define TIMER_SHOW(name) pr_notice_ratelimited("%s: %llu ns\n", #name, (end_##name - start_##name) * 1000000000 / CPUFREQ)
++#else
++#define TIMER_ON(name)
++#define TIMER_OFF(name)
++#define TIMER_SHOW(name)
++#endif
++
++static unsigned long dsa_timeout_ms = 5000;
++static unsigned long dsa_timeout_jiffies;
++static struct dma_chan *channels[MAX_CHAN];
++static struct dma_device *copy_dev[MAX_CHAN];
++DEFINE_PER_CPU(local_lock_t, dsa_copy_local_lock) = INIT_LOCAL_LOCK(dsa_copy_local_lock);
++DEFINE_PER_CPU(struct mutex, dsa_copy_local_mutex);
++#ifdef USE_PER_CPU_VARIABLES
++DEFINE_PER_CPU(struct page*, global_idxd_desc_page[MAX_CHAN]);
++DEFINE_PER_CPU(struct idxd_desc*, global_idxd_desc[MAX_CHAN]);
++DEFINE_PER_CPU(struct page*, global_dsa_desc_page[MAX_CHAN]);
++DEFINE_PER_CPU(struct dsa_hw_desc*, global_dsa_desc[MAX_CHAN]);
++DEFINE_PER_CPU(struct page*, global_dsa_comp_page[MAX_CHAN]);
++DEFINE_PER_CPU(struct dsa_completion_record*, global_dsa_comp[MAX_CHAN]);
++DEFINE_PER_CPU(struct page*, global_dsa_bdesc_page[MAX_CHAN]);
++DEFINE_PER_CPU(struct dsa_hw_desc*, global_dsa_bdesc[MAX_CHAN]); // Descriptor List Address (VA)
++DEFINE_PER_CPU(struct page*, global_dsa_bcomp_page[MAX_CHAN]);
++DEFINE_PER_CPU(struct dsa_completion_record*, global_dsa_bcomp[MAX_CHAN]); // Completion List Address (VA)
++DEFINE_PER_CPU(struct page*, global_completion_page[MAX_CHAN]);
++DEFINE_PER_CPU(struct completion*, global_completion[MAX_CHAN]);
++#else
++static struct page *global_idxd_desc_page[NR_CPUS][MAX_CHAN];
++static struct idxd_desc *global_idxd_desc[NR_CPUS][MAX_CHAN];
++static struct page *global_dsa_desc_page[NR_CPUS][MAX_CHAN];
++static struct dsa_hw_desc *global_dsa_desc[NR_CPUS][MAX_CHAN];
++static struct page *global_dsa_comp_page[NR_CPUS][MAX_CHAN];
++static struct dsa_completion_record *global_dsa_comp[NR_CPUS];
++static struct page *global_dsa_bdesc_page[NR_CPUS][MAX_CHAN];
++static struct dsa_hw_desc *global_dsa_bdesc[NR_CPUS][MAX_CHAN];
++static struct page *global_dsa_bcomp_page[NR_CPUS][MAX_CHAN];
++static struct dsa_completion_record *global_dsa_bcomp[NR_CPUS][MAX_CHAN];
++static struct page *global_completion_page[NR_CPUS][MAX_CHAN];
++static struct completion *global_completion[NR_CPUS][MAX_CHAN];
++#endif
++
++#ifdef USE_PER_CPU_VARIABLES
++    #define per_cpu_ptr_wrapper(ptr, cpu) per_cpu_ptr(ptr, cpu)
++    #define per_cpu_wrapper(ptr, cpu) per_cpu(ptr, cpu)
++    #define this_cpu_ptr_wrapper(ptr) this_cpu_ptr(ptr)
++#else
++    #define per_cpu_ptr_wrapper(ptr, cpu) (&((ptr)[cpu]))
++    #define per_cpu_wrapper(ptr, cpu) ((ptr)[cpu])
++    #define this_cpu_ptr_wrapper(ptr) (&((ptr)[smp_processor_id()]))
++#endif
++
++static void dma_complete_func(void *completion) { complete(completion); }
++static inline struct idxd_wq *to_idxd_wq(struct dma_chan *c) {
++	struct idxd_dma_chan *idxd_chan;
++
++    idxd_chan = container_of(c, struct idxd_dma_chan, chan);
++	return idxd_chan->wq;
++}
++
++static int dsa_init(void) {
++    dma_cap_mask_t mask;
++    struct idxd_desc *idxd_desc;
++    struct dsa_hw_desc *dsa_desc, *dsa_bdesc;
++    struct dsa_completion_record *dsa_comp, *dsa_bcomp;
++    struct completion *done;
++    struct idxd_wq *wq;
++    struct page *idxd_desc_page, *dsa_desc_page, *dsa_comp_page, *dsa_bdesc_page, *dsa_bcomp_page, *completion_page;
++    int cpu, i, j;
++
++    dma_cap_zero(mask);
++	dma_cap_set(DMA_MEMCPY, mask);
++
++    // Get the DMA channel
++    for (i = 0; i < limit_chans; ++i) {
++        channels[i] = dma_request_channel(mask, NULL, NULL);
++        if (IS_ERR(channels[i]) || !channels[i]) {
++            pr_err("Failed to get DMA channel %d.\n", i);
++            goto NODEV;
++        }
++        copy_dev[i] = channels[i]->device;
++        if (!copy_dev[i]) {
++            pr_err("%s: no device: %d\n", __func__, i);
++            goto NODEV;
++        }
++    }
++
++    // Init dsa descriptor
++    for_each_possible_cpu(cpu) {
++        for (i = 0; i < limit_chans; ++i) {
++            ((struct page**)per_cpu_ptr_wrapper(global_idxd_desc_page, cpu))[i] = alloc_page(GFP_KERNEL);
++            idxd_desc_page = ((struct page**)per_cpu_ptr_wrapper(global_idxd_desc_page, cpu))[i];
++            ((struct idxd_desc**)per_cpu_ptr_wrapper(global_idxd_desc, cpu))[i] = page_to_virt(idxd_desc_page);
++        
++            ((struct page**)per_cpu_ptr_wrapper(global_dsa_desc_page, cpu))[i] = alloc_page(GFP_KERNEL);
++            dsa_desc_page = ((struct page**)per_cpu_ptr_wrapper(global_dsa_desc_page, cpu))[i];
++            ((struct dsa_hw_desc**)per_cpu_ptr_wrapper(global_dsa_desc, cpu))[i] = page_to_virt(dsa_desc_page);
++
++            ((struct page**)per_cpu_ptr_wrapper(global_dsa_comp_page, cpu))[i] = alloc_page(GFP_KERNEL);
++            dsa_comp_page = ((struct page**)per_cpu_ptr_wrapper(global_dsa_comp_page, cpu))[i];
++            ((struct dsa_completion_record**)per_cpu_ptr_wrapper(global_dsa_comp, cpu))[i] = page_to_virt(dsa_comp_page);
++
++            ((struct page**)per_cpu_ptr_wrapper(global_completion_page, cpu))[i] = alloc_page(GFP_KERNEL);
++            completion_page = ((struct page**)per_cpu_ptr_wrapper(global_completion_page, cpu))[i];
++            ((struct completion**)per_cpu_ptr_wrapper(global_completion, cpu))[i] = page_to_virt(completion_page);
++            
++            if (!idxd_desc_page || !dsa_desc_page || !dsa_comp_page || !completion_page) {
++                pr_err("Failed to allocate page for idxd_desc, dsa_desc, dsa_comp or completion.\n");
++                goto NODEV;
++            }
++
++            idxd_desc = page_to_virt(idxd_desc_page);
++            memset(idxd_desc, 0, PAGE_SIZE);
++            dsa_desc = page_to_virt(dsa_desc_page);
++            memset(dsa_desc, 0, PAGE_SIZE);
++            dsa_comp = page_to_virt(dsa_comp_page);
++            memset(dsa_comp, 0, PAGE_SIZE);
++            done = page_to_virt(completion_page);
++            memset(done, 0, PAGE_SIZE);
++            
++            wq = to_idxd_wq(channels[i]);
++            for (j = 0; j < MAX_IDXD_DESC; ++j) {
++                idxd_desc[j].hw = &dsa_desc[j];
++                idxd_desc[j].desc_dma = 0; // desc_dma is not used
++                idxd_desc[j].completion = &dsa_comp[j];
++                idxd_desc[j].compl_dma = virt_to_phys(idxd_desc[j].completion);
++                idxd_desc[j].cpu = cpu;
++                idxd_desc[j].id = -1;
++                idxd_desc[j].wq = wq;
++
++                dsa_desc[j].priv = 1;
++                dsa_desc[j].flags = IDXD_OP_FLAG_CRAV | IDXD_OP_FLAG_RCR;
++                dsa_desc[j].completion_addr = idxd_desc[j].compl_dma;
++            }
++        }
++    }
++
++    // Init batch descriptor
++    for_each_possible_cpu(cpu) {
++        for (i = 0; i < limit_chans; ++i) {
++            ((struct page**)per_cpu_ptr_wrapper(global_dsa_bdesc_page, cpu))[i] = alloc_pages(GFP_KERNEL, 1);
++            dsa_bdesc_page = ((struct page**)per_cpu_ptr_wrapper(global_dsa_bdesc_page, cpu))[i];
++            ((struct dsa_hw_desc**)per_cpu_ptr_wrapper(global_dsa_bdesc, cpu))[i] = page_to_virt(dsa_bdesc_page);
++            ((struct page**)per_cpu_ptr_wrapper(global_dsa_bcomp_page, cpu))[i] = alloc_pages(GFP_KERNEL, 1);
++            dsa_bcomp_page = ((struct page**)per_cpu_ptr_wrapper(global_dsa_bcomp_page, cpu))[i];
++            ((struct dsa_completion_record**)per_cpu_ptr_wrapper(global_dsa_bcomp, cpu))[i] = page_to_virt(dsa_bcomp_page);
++
++            if (!dsa_bdesc_page || !dsa_bcomp_page) {
++                pr_err("Failed to allocate page for dsa_bdesc or dsa_bcomp.\n");
++                goto NODEV;
++            }
++
++            dsa_bdesc = page_to_virt(dsa_bdesc_page);
++            memset(dsa_bdesc, 0, PAGE_SIZE * 2);
++            dsa_bcomp = page_to_virt(dsa_bcomp_page);
++            memset(dsa_bcomp, 0, PAGE_SIZE * 2);
++            for (j = 0; j < MAX_BATCH_SIZE; ++j) {
++                dsa_bdesc[j].priv = 1;
++                dsa_bdesc[j].flags = IDXD_OP_FLAG_CRAV | IDXD_OP_FLAG_RCR;
++                dsa_bdesc[j].opcode = DSA_OPCODE_MEMMOVE;
++                dsa_bdesc[j].completion_addr = virt_to_phys(&dsa_bcomp[j]);
++            }
++        }
++    }
++
++    for_each_possible_cpu(cpu) {
++        mutex_init(per_cpu_ptr(&dsa_copy_local_mutex, cpu));
++    }
++
++    dsa_timeout_jiffies = msecs_to_jiffies(dsa_timeout_ms);
++
++    return 0;
++
++NODEV:
++    for (; i >= 0; --i) {
++        if (channels[i]) {
++            dma_release_channel(channels[i]);
++        }
++    }
++    return -ENODEV;
++}
++
++static void dsa_release(void) {
++    struct page *page;
++    int cpu, i;
++
++    pr_notice("DMA memcpy module exit.\n");
++
++    for (i = 0; i < limit_chans; ++i) {
++        if (channels[i]) {
++            dma_release_channel(channels[i]);
++        }
++    }
++
++    // Free global_idxd_desc_page, global_dsa_desc_page and global_dsa_comp_page
++    for_each_possible_cpu(cpu) {
++       for (i = 0; i < limit_chans; ++i) {
++            page = ((struct page**)per_cpu_ptr_wrapper(global_idxd_desc_page, cpu))[i];
++            if (page) {
++                __free_page(page);
++            }
++            page = ((struct page**)per_cpu_ptr_wrapper(global_dsa_desc_page, cpu))[i];
++            if (page) {
++                __free_page(page);
++            }
++            page = ((struct page**)per_cpu_ptr_wrapper(global_dsa_comp_page, cpu))[i];
++            if (page) {
++                __free_page(page);
++            }
++            page = ((struct page**)per_cpu_ptr_wrapper(global_completion_page, cpu))[i];
++            if (page) {
++                __free_page(page);
++            }
++        }
++    }
++
++    // Free global_dsa_bdesc_page and global_dsa_bcomp_page
++    for_each_possible_cpu(cpu) {
++        for (i = 0; i < limit_chans; ++i) {
++            page = ((struct page**)per_cpu_ptr_wrapper(global_dsa_bdesc_page, cpu))[i];
++            if (page) {
++                __free_pages(page, 1);
++            }
++            page = ((struct page**)per_cpu_ptr_wrapper(global_dsa_bcomp_page, cpu))[i];
++            if (page) {
++                __free_pages(page, 1);
++            }
++        }
++    }
++}
++
++#define UMWAIT_DELAY 100000
++#define UMWAIT_STATE 1
++
++static inline void umonitor(volatile void *addr) {
++	asm volatile(".byte 0xf3, 0x48, 0x0f, 0xae, 0xf0" : : "a"(addr));
++}
++
++static inline int umwait(unsigned long timeout, unsigned int state) {
++	uint8_t r;
++	uint32_t timeout_low = (uint32_t)timeout;
++	uint32_t timeout_high = (uint32_t)(timeout >> 32);
++
++	timeout_low = (uint32_t)timeout;
++	timeout_high = (uint32_t)(timeout >> 32);
++
++	asm volatile(".byte 0xf2, 0x48, 0x0f, 0xae, 0xf1\t\n"
++		"setc %0\t\n"
++		: "=r"(r)
++		: "c"(state), "a"(timeout_low), "d"(timeout_high));
++	return r;
++}
++
++static __always_inline void wait_for_dsa_completion(struct idxd_desc *idxd_desc, int *poll_retry) {
++    *poll_retry = 0;
++    switch (dsa_sync_mode) {
++        case 0: 
++            while (idxd_desc->completion->status == DSA_COMP_NONE && ++(*poll_retry) < POLL_RETRY_MAX);
++            break;
++        case 1: 
++            while (idxd_desc->completion->status == DSA_COMP_NONE && ++(*poll_retry) < POLL_RETRY_MAX) cond_resched();
++            break;
++        case 2: 
++            while (idxd_desc->completion->status == DSA_COMP_NONE && ++(*poll_retry) < POLL_RETRY_MAX) __builtin_ia32_pause();
++            break;
++        case 3:
++            while (idxd_desc->completion->status == DSA_COMP_NONE && ++(*poll_retry) < POLL_RETRY_MAX) {
++                umonitor(idxd_desc->completion);
++                if (idxd_desc->completion->status == DSA_COMP_NONE) {
++                    umwait(rdtsc() + UMWAIT_DELAY, UMWAIT_STATE);
++                }
++            }
++            break;
++    }
++    
++    // if (idxd_desc->completion->status != DSA_COMP_SUCCESS) {
++    //     pr_err("idxd_desc failed with status %u, poll_retry %u.\n", idxd_desc->completion->status, *poll_retry);
++    // }
++}
++
++static int idxd_fast_submit_desc(struct idxd_wq *wq, struct idxd_desc *desc) {
++	void __iomem *portal;
++    struct idxd_irq_entry *ie = NULL;
++    u32 desc_flags = desc->hw->flags;
++
++	portal = idxd_wq_portal_addr(wq);
++	
++    wmb();
++
++    if (desc_flags & IDXD_OP_FLAG_RCI) {
++		ie = &wq->ie;
++		desc->hw->int_handle = ie->int_handle;
++		llist_add(&desc->llnode, &ie->pending_llist);
++	}
++
++	iosubmit_cmds512(portal, desc->hw, 1);
++
++	return 0;
++}
++
++// require nr_pages mod limit_chans equals 0
++// it's non-reentrant functions because of per-cpu variables, or use preempt_disable/enable
++int dsa_multi_copy_pages(struct page *to, struct page *from, int nr_pages) {
++    struct mutex *cur_mutex;
++    struct idxd_desc **idxd_desc;
++    struct completion **done;
++    uint32_t page_offset, poll_retry = 0;
++    int i;
++
++    // local_lock(&dsa_copy_local_lock);
++    cur_mutex = this_cpu_ptr(&dsa_copy_local_mutex);
++    mutex_lock(cur_mutex);
++
++    TIMER_ON(prepare_desc);
++    done = (struct completion**)this_cpu_ptr_wrapper(global_completion);
++    idxd_desc = (struct idxd_desc**)this_cpu_ptr_wrapper(global_idxd_desc);
++    // page_offset = nr_pages / limit_chans;
++    page_offset = nr_pages * PAGE_SIZE / limit_chans;
++    for (i = 0; i < limit_chans; ++i) {
++        idxd_desc[i][0].hw->opcode = DSA_OPCODE_MEMMOVE;
++        idxd_desc[i][0].hw->src_addr = page_to_phys(from) + i * page_offset;
++        idxd_desc[i][0].hw->dst_addr = page_to_phys(to) + i * page_offset;
++        idxd_desc[i][0].hw->xfer_size = page_offset;
++        idxd_desc[i][0].hw->flags = IDXD_OP_FLAG_CRAV | IDXD_OP_FLAG_RCR;
++        idxd_desc[i][0].completion->status = DSA_COMP_NONE;
++        
++        if (dsa_async_mode) {
++            init_completion(&done[i][0]);
++            idxd_desc[i][0].hw->flags |= IDXD_OP_FLAG_RCI;
++            idxd_desc[i][0].txd.callback = dma_complete_func;
++            idxd_desc[i][0].txd.callback_param = &done[i][0];
++        }
++        // pr_notice("wq name: %s id %d size %u max_wq %d\n", idxd_desc[i].wq->name, idxd_desc[i].wq->id, idxd_desc[i].wq->size, idxd_desc[i].wq->idxd->max_wqs);
++        idxd_fast_submit_desc(idxd_desc[i][0].wq, &idxd_desc[i][0]);
++    }
++    TIMER_OFF(prepare_desc);
++
++    TIMER_ON(submit_desc);
++    // for (int i = 0; i < limit_chans; ++i) {
++    //     idxd_fast_submit_desc(idxd_desc[i].wq, &idxd_desc[i]);
++    // }
++    TIMER_OFF(submit_desc);
++
++    TIMER_ON(wait_for_completion);
++    for (i = 0; i < limit_chans; ++i) {
++        if (dsa_async_mode)
++            wait_for_completion_timeout(&done[i][0], dsa_timeout_jiffies);
++        else
++            wait_for_dsa_completion(&idxd_desc[i][0], &poll_retry);
++        // pr_notice("idxd_desc[%d] status %u, poll_retry %u.\n", i, idxd_desc[i].completion->status, poll_retry);
++        if (idxd_desc[i][0].completion->status != DSA_COMP_SUCCESS) {
++            pr_err_ratelimited("idxd_desc[%d][%d] failed with status %u, poll_retry %u.\n", i, 0, idxd_desc[i][0].completion->status, poll_retry);
++            use_dsa_copy_pages = 0;
++            mutex_unlock(cur_mutex);
++            return -EIO;
++        }
++    }
++    TIMER_OFF(wait_for_completion);
++
++    // local_unlock(&dsa_copy_local_lock);
++    mutex_unlock(cur_mutex);
++
++#ifdef TIMER_ENABLE
++    // TIMER_SHOW(prepare_and_submit_desc);
++    TIMER_SHOW(prepare_desc);
++    TIMER_SHOW(submit_desc);
++    TIMER_SHOW(wait_for_completion);
++#endif
++
++    return 0;
++}
++EXPORT_SYMBOL(dsa_multi_copy_pages);
++
++// nr_pages should greater than 1 and less than or equal to MAX_BATCH_SIZE
++// use channel idx to process the batch, multiple 4KB pages to test batch processing
++__always_unused int dsa_batch_copy_pages(struct page *to, struct page *from, int nr_pages) {
++    struct idxd_desc **idxd_desc;
++    struct dsa_hw_desc *dsa_bdesc;
++    struct dsa_completion_record *dsa_bcomp;
++    uint32_t poll_retry = 0;
++    int i, idx = 0;
++
++    TIMER_ON(prepare_desc);
++    idxd_desc = (struct idxd_desc**)this_cpu_ptr_wrapper(global_idxd_desc);
++    // dsa_bdesc = *(struct dsa_hw_desc**)this_cpu_ptr(global_dsa_bdesc[idx]);
++    dsa_bdesc = ((struct dsa_hw_desc**)this_cpu_ptr_wrapper(global_dsa_bdesc))[idx];
++    // dsa_bcomp = *(struct dsa_completion_record**)this_cpu_ptr(global_dsa_bcomp[idx]);
++    dsa_bcomp = ((struct dsa_completion_record**)this_cpu_ptr_wrapper(global_dsa_bcomp))[idx];
++
++    idxd_desc[idx][0].hw->opcode = DSA_OPCODE_BATCH;
++    idxd_desc[idx][0].hw->desc_list_addr = virt_to_phys(dsa_bdesc);
++    idxd_desc[idx][0].hw->dst_addr = 0; // not used but must be set to 0
++    idxd_desc[idx][0].hw->desc_count = nr_pages;
++    idxd_desc[idx][0].completion->status = DSA_COMP_NONE;
++
++    for (i = 0; i < nr_pages; ++i) {
++        dsa_bdesc[i].src_addr = page_to_phys(from + i);
++        dsa_bdesc[i].dst_addr = page_to_phys(to + i);
++        dsa_bdesc[i].xfer_size = PAGE_SIZE;
++        dsa_bcomp[i].status = DSA_COMP_NONE;
++    }
++    TIMER_OFF(prepare_desc);
++
++    TIMER_ON(submit_desc);
++    idxd_fast_submit_desc(idxd_desc[idx][0].wq, &idxd_desc[idx][0]);
++    TIMER_OFF(submit_desc);
++
++    TIMER_ON(wait_for_completion);
++    wait_for_dsa_completion(&idxd_desc[idx][0], &poll_retry);
++    if (idxd_desc[idx][0].completion->status != DSA_COMP_SUCCESS) {
++        pr_err_ratelimited("idxd_desc[%d][%d] failed with status %u, poll_retry %u.\n", idx, 0, idxd_desc[idx][0].completion->status, poll_retry);
++        // for (i = 0; i < nr_pages; ++i) {
++        //     if (dsa_bcomp[i].status != DSA_COMP_SUCCESS) {
++        //         pr_err("dsa_bcomp[%d] failed with status %u.\n", i, dsa_bcomp[i].status);
++        //     }
++        // }
++        return -EIO;
++    }
++    TIMER_OFF(wait_for_completion);
++
++#ifdef TIMER_ENABLE
++    TIMER_SHOW(prepare_desc);
++    TIMER_SHOW(submit_desc);
++    TIMER_SHOW(wait_for_completion);
++#endif
++
++    return 0;
++}
++EXPORT_SYMBOL(dsa_batch_copy_pages);
++
++__always_unused int dsa_copy_page(struct page *to, struct page *from) {
++    struct idxd_desc **idxd_desc;
++    uint32_t poll_retry = 0;
++    int idx = 0;
++
++    TIMER_ON(prepare_desc);
++    idxd_desc = (struct idxd_desc**)this_cpu_ptr_wrapper(global_idxd_desc);
++    idxd_desc[idx][0].hw->opcode = DSA_OPCODE_MEMMOVE;
++    idxd_desc[idx][0].hw->src_addr = page_to_phys(from);
++    idxd_desc[idx][0].hw->dst_addr = page_to_phys(to);
++    idxd_desc[idx][0].hw->xfer_size = PAGE_SIZE;
++    idxd_desc[idx][0].completion->status = DSA_COMP_NONE;
++    TIMER_OFF(prepare_desc);
++
++    TIMER_ON(submit_desc);
++    idxd_fast_submit_desc(idxd_desc[idx][0].wq, &idxd_desc[idx][0]);
++    TIMER_OFF(submit_desc);
++
++    TIMER_ON(wait_for_completion);
++    wait_for_dsa_completion(&idxd_desc[idx][0], &poll_retry);
++    if (idxd_desc[idx][0].completion->status != DSA_COMP_SUCCESS) {
++        pr_err_ratelimited("idxd_desc[%d][%d] failed with status %u, poll_retry %u.\n", idx, 0, idxd_desc[idx][0].completion->status, poll_retry);
++        return -EIO;
++    }
++    TIMER_OFF(wait_for_completion);
++
++#ifdef TIMER_ENABLE
++    TIMER_SHOW(prepare_desc);
++    TIMER_SHOW(submit_desc);
++    TIMER_SHOW(wait_for_completion);
++#endif
++
++    return 0;
++}
++EXPORT_SYMBOL(dsa_copy_page);
++
++// use dsa to copy a list of pages containing 4KB base pages and 2MB thp pages
++// use multiple channels to copy 2MB pages and batch processing to copy 4KB pages
++int dsa_copy_page_lists(struct page **to, struct page **from, int nr_items) {
++    struct mutex *cur_mutex;
++    struct idxd_desc **idxd_desc;
++    struct completion **done;
++    struct dsa_hw_desc **dsa_bdesc;
++    struct dsa_completion_record **dsa_bcomp;
++    uint32_t page_offset, poll_retry;
++    int i, j, t, nr_base_pages, nr_huge_pages, cur_chan;
++    int sub_pages, batch_size, batch_size_remain;
++    int begin = 0, end = 0;
++    int tail[MAX_CHAN];
++
++    // local_lock(&dsa_copy_local_lock);
++    cur_mutex = this_cpu_ptr(&dsa_copy_local_mutex);
++    mutex_lock(cur_mutex);
++
++    done = (struct completion**)this_cpu_ptr_wrapper(global_completion);
++    idxd_desc = (struct idxd_desc**)this_cpu_ptr_wrapper(global_idxd_desc);
++    dsa_bdesc = (struct dsa_hw_desc**)this_cpu_ptr_wrapper(global_dsa_bdesc);
++    dsa_bcomp = (struct dsa_completion_record**)this_cpu_ptr_wrapper(global_dsa_bcomp);
++
++retry:
++    memset(tail, 0, sizeof(tail));
++    begin = end;
++    nr_base_pages = nr_huge_pages = cur_chan = 0;
++
++    // use multiple channels to copy 2MB pages
++    for (i = begin; i < nr_items; ++i) {
++        if (thp_nr_pages(from[i]) != thp_nr_pages(to[i])) {
++            pr_err("The number of pages in from[%d] and to[%d] are not equal, thp_nr_pages(from[%d]) = %d, thp_nr_pages(to[%d]) = %d.\n", i, i, i, thp_nr_pages(from[i]), i, thp_nr_pages(to[i]));
++            mutex_unlock(cur_mutex);
++            return -EINVAL;
++        }
++        sub_pages = thp_nr_pages(from[i]);
++        if (sub_pages > 1) {
++            page_offset = sub_pages * PAGE_SIZE / limit_chans;
++            for (j = 0; j < limit_chans; ++j) {
++                t = tail[j]++;
++                idxd_desc[j][t].hw->opcode = DSA_OPCODE_MEMMOVE;
++                idxd_desc[j][t].hw->src_addr = page_to_phys(from[i]) + j * page_offset;
++                idxd_desc[j][t].hw->dst_addr = page_to_phys(to[i]) + j * page_offset;
++                idxd_desc[j][t].hw->xfer_size = page_offset;
++                idxd_desc[j][t].completion->status = DSA_COMP_NONE;
++                idxd_desc[j][t].hw->flags = IDXD_OP_FLAG_CRAV | IDXD_OP_FLAG_RCR;
++
++                if (dsa_async_mode) {
++                    init_completion(&done[j][t]);
++                    idxd_desc[j][t].hw->flags |= IDXD_OP_FLAG_RCI;
++                    idxd_desc[j][t].txd.callback = dma_complete_func;
++                    idxd_desc[j][t].txd.callback_param = &done[j][t];
++                }
++
++                // pr_notice("wq name: %s id %d size %u max_wq %d\n", idxd_desc[j].wq->name, idxd_desc[j].wq->id, idxd_desc[j].wq->size, idxd_desc[j].wq->idxd->max_wqs);
++                idxd_fast_submit_desc(idxd_desc[j][t].wq, &idxd_desc[j][t]);
++            }
++            ++nr_huge_pages;
++        } else {
++            ++nr_base_pages;
++        }
++        if (nr_base_pages == MAX_BPAGE_NR || nr_huge_pages == MAX_HPAGE_NR) {
++            end = i + 1;
++            break;
++        }
++    }
++    // end isn't updated, so there's no page left
++    if (begin == end) {
++        end = nr_items;
++    }
++
++    batch_size = nr_base_pages / limit_chans;
++    batch_size_remain = nr_base_pages % limit_chans;
++    nr_base_pages = 0;
++    for (i = begin; i < end; ++i) {
++        if (thp_nr_pages(from[i]) > 1) continue;
++
++        // for corner case, we use simple dsa-copy way (i.e., dsa_copy_page), but we can still ultilize multiple channels
++        if (batch_size < 2) {
++            t = tail[cur_chan]++;
++
++            idxd_desc[cur_chan][t].hw->opcode = DSA_OPCODE_MEMMOVE;
++            idxd_desc[cur_chan][t].hw->src_addr = page_to_phys(from[i]);
++            idxd_desc[cur_chan][t].hw->dst_addr = page_to_phys(to[i]);
++            idxd_desc[cur_chan][t].hw->xfer_size = PAGE_SIZE;
++            idxd_desc[cur_chan][t].completion->status = DSA_COMP_NONE;
++            idxd_desc[cur_chan][t].hw->flags = IDXD_OP_FLAG_CRAV | IDXD_OP_FLAG_RCR;
++
++            if (dsa_async_mode) {
++                init_completion(&done[cur_chan][t]);
++                idxd_desc[cur_chan][t].hw->flags |= IDXD_OP_FLAG_RCI;
++                idxd_desc[cur_chan][t].txd.callback = dma_complete_func;
++                idxd_desc[cur_chan][t].txd.callback_param = &done[cur_chan][t];
++            }
++
++            idxd_fast_submit_desc(idxd_desc[cur_chan][t].wq, &idxd_desc[cur_chan][t]);
++            cur_chan = (cur_chan + 1 < limit_chans ? cur_chan + 1 : 0);
++        // use batch processing to copy 4KB pages 
++        } else {
++            t = nr_base_pages++;
++
++            dsa_bdesc[cur_chan][t].src_addr = page_to_phys(from[i]);
++            dsa_bdesc[cur_chan][t].dst_addr = page_to_phys(to[i]);
++            dsa_bdesc[cur_chan][t].xfer_size = PAGE_SIZE;
++            dsa_bcomp[cur_chan][t].status = DSA_COMP_NONE;
++            
++            if (nr_base_pages == (batch_size + (cur_chan < batch_size_remain))) {
++                t = tail[cur_chan]++;
++
++                idxd_desc[cur_chan][t].hw->opcode = DSA_OPCODE_BATCH;
++                idxd_desc[cur_chan][t].hw->desc_list_addr = virt_to_phys(dsa_bdesc[cur_chan]);
++                idxd_desc[cur_chan][t].hw->dst_addr = 0; // not used but must be set to 0
++                idxd_desc[cur_chan][t].hw->desc_count = nr_base_pages;
++                idxd_desc[cur_chan][t].completion->status = DSA_COMP_NONE;
++                idxd_desc[cur_chan][t].hw->flags = IDXD_OP_FLAG_CRAV | IDXD_OP_FLAG_RCR;
++
++                if (dsa_async_mode) {
++                    init_completion(&done[cur_chan][t]);
++                    idxd_desc[cur_chan][t].hw->flags |= IDXD_OP_FLAG_RCI;
++                    idxd_desc[cur_chan][t].txd.callback = dma_complete_func;
++                    idxd_desc[cur_chan][t].txd.callback_param = &done[cur_chan][t];
++                }
++
++                idxd_fast_submit_desc(idxd_desc[cur_chan][t].wq, &idxd_desc[cur_chan][t]);
++
++                nr_base_pages = 0;
++                ++cur_chan;
++            }
++        }
++    }
++    
++    // wait for completion
++    for (i = 0; i < limit_chans; ++i) {
++        for (j = 0; j < tail[i]; ++j) {
++            if (dsa_async_mode)
++                wait_for_completion_timeout(&done[i][j], dsa_timeout_jiffies);
++            else
++                wait_for_dsa_completion(&idxd_desc[i][j], &poll_retry);
++            if (idxd_desc[i][j].completion->status != DSA_COMP_SUCCESS) {
++                pr_err_ratelimited("idxd_desc[%d][%d] failed with status %u, poll_retry %u.\n", i, j, idxd_desc[i][j].completion->status, poll_retry);
++                mutex_unlock(cur_mutex);
++                return -EIO;
++            }
++        }
++    }
++
++    if (end < nr_items) {
++        goto retry;
++    }
++
++
++    // local_unlock(&dsa_copy_local_lock);
++    mutex_unlock(cur_mutex);
++
++    return 0;
++}
++EXPORT_SYMBOL(dsa_copy_page_lists);
++
++static int timer_proc_show(struct seq_file *m, void *v) {
++    seq_printf(m, 
++        "timer_state = %d total_time = %llums last_time = %lluns last_cnt = %lu dsa_hpage_cnt = %lu dsa_bpage_cnt = %lu dsa_copy_fail = %lu hpage_cnt = %lu bpage_cnt = %lu\n",
++        timer_state, ktime_to_ms(total_time), ktime_to_ns(last_time), last_cnt, atomic_long_read(&dsa_hpage_cnt), atomic_long_read(&dsa_bpage_cnt), atomic_long_read(&dsa_copy_fail), atomic_long_read(&hpage_cnt), atomic_long_read(&bpage_cnt)
++        // max_hpage_cnt, max_bpage_cnt
++    );
++    return 0;
++}
++
++static int timer_proc_open(struct inode *inode, struct file *file) {
++    return single_open(file, timer_proc_show, NULL);
++}
++
++static ssize_t timer_proc_write(struct file *file, const char __user *buffer, size_t len, loff_t *f_pos) {
++    static char kbuf[1024];
++    unsigned long rc;
++    int val;
++
++    rc = copy_from_user(kbuf, buffer, len);
++    pr_notice("rc: %lu len(buf): %lu buf: %s\n", rc, strlen(kbuf), kbuf);
++    rc = sscanf(kbuf, "%d", &val);
++    if (rc == 1) {
++        if (timer_state == TIMER_OFF && val == TIMER_ON) {
++            total_time = last_time = ktime_set(0, 0);
++            last_cnt = 0;
++            atomic_long_set(&dsa_copy_fail, 0);
++            atomic_long_set(&hpage_cnt, 0);
++            atomic_long_set(&bpage_cnt, 0);
++            atomic_long_set(&dsa_hpage_cnt, 0);
++            atomic_long_set(&dsa_bpage_cnt, 0);
++        }
++        if (val == TIMER_ON || val == TIMER_OFF)
++            timer_state = val;
++    } else {
++        pr_notice("Error: rc is %lu, fail to parse %s\n", rc, kbuf);
++    }
++    return len;
++}
++
++int sysctl_dsa_state_handler(struct ctl_table *table, int write,
++	void *buffer, size_t *lenp, loff_t *ppos) {
++    int ret, oldval, rc;
++    
++    oldval = dsa_state;
++    ret = proc_dointvec_minmax(table, write, buffer, lenp, ppos);
++
++    if (dsa_state != oldval) {
++        if (dsa_state) {
++            rc = dsa_init();
++            if (rc) {
++                pr_err("Failed to initialize DSA.\n");
++            }
++        } else {
++            dsa_release();
++        }
++    }
++
++    return ret;
++}
++EXPORT_SYMBOL(sysctl_dsa_state_handler);
++
++static const struct proc_ops timer_proc_ops = {
++    .proc_open = timer_proc_open,
++    .proc_read = seq_read,
++    .proc_write = timer_proc_write,
++    .proc_lseek = seq_lseek,
++    .proc_release = single_release,
++};
++
++static int __init exp_init(void) {
++    struct proc_dir_entry *proc_file_entry;
++
++    pr_notice("exp module is loading\n");
++
++    total_time = last_time = ktime_set(0, 0);
++    atomic_long_set(&dsa_copy_fail, 0);
++    atomic_long_set(&hpage_cnt, 0);
++    atomic_long_set(&bpage_cnt, 0);
++    atomic_long_set(&dsa_hpage_cnt, 0);
++    atomic_long_set(&dsa_bpage_cnt, 0);
++    last_cnt = dsa_state = use_dsa_copy_pages = 0;
++    // max_bpage_cnt = max_hpage_cnt = 0;
++    timer_state = TIMER_OFF;
++
++    spin_lock_init(&timer_lock);
++
++    proc_file_entry = proc_create(PROC_FILENAME, 0, NULL, &timer_proc_ops);
++    if (proc_file_entry == NULL) {
++        pr_err("Can't create proc entry: %s\n", PROC_FILENAME);
++    }
++
++    return 0;
++}
++
++static void __exit exp_exit(void) {
++    remove_proc_entry(PROC_FILENAME, NULL);
++    pr_notice("exp module unloaded\n");
++}
++
++module_init(exp_init);
++module_exit(exp_exit);
++
++MODULE_LICENSE("GPL");
++MODULE_AUTHOR("LRL52");
+diff --git a/drivers/misc/experiment/exp.h b/drivers/misc/experiment/exp.h
+new file mode 100644
+index 000000000..cad5d1384
+--- /dev/null
++++ b/drivers/misc/experiment/exp.h
+@@ -0,0 +1,30 @@
++#ifndef _MISC_EXP_H
++#define _MISC_EXP_H
++
++#include "linux/percpu-defs.h"
++#include <linux/ktime.h>
++#include <linux/spinlock.h>
++#include "linux/atomic.h"
++
++extern ktime_t total_time, last_time;
++extern atomic_long_t dsa_copy_fail, hpage_cnt, bpage_cnt, dsa_hpage_cnt, dsa_bpage_cnt;
++extern int timer_state, dsa_state, use_dsa_copy_pages, dsa_copy_threshold, dsa_async_mode, dsa_sync_mode;
++extern unsigned long last_cnt;
++// extern int max_hpage_cnt, max_bpage_cnt;
++extern int limit_chan;
++extern spinlock_t timer_lock;
++
++extern int dsa_multi_copy_pages(struct page *to, struct page *from, int nr_pages);
++extern int dsa_batch_copy_pages(struct page *to, struct page *from, int nr_pages);
++extern int dsa_copy_page(struct page *to, struct page *from);
++extern int dsa_copy_page_lists(struct page **to, struct page **from, int nr_items);
++
++extern int sysctl_dsa_state_handler(struct ctl_table *table, int write,
++	void *buffer, size_t *lenp, loff_t *ppos);
++
++enum TIMER_STATE{
++    TIMER_OFF,
++    TIMER_ON,
++};
++
++#endif
+\ No newline at end of file
+diff --git a/fs/proc/proc_sysctl.c b/fs/proc/proc_sysctl.c
+index dea0f5ee5..b6fc5224b 100644
+--- a/fs/proc/proc_sysctl.c
++++ b/fs/proc/proc_sysctl.c
+@@ -25,7 +25,7 @@ static const struct file_operations proc_sys_dir_file_operations;
+ static const struct inode_operations proc_sys_dir_operations;
+ 
+ /* shared constants to be used in various sysctls */
+-const int sysctl_vals[] = { 0, 1, INT_MAX };
++const int sysctl_vals[] = { 0, 1, 3, INT_MAX };
+ EXPORT_SYMBOL(sysctl_vals);
+ 
+ /* Support for permanently empty directories */
+diff --git a/include/linux/highmem.h b/include/linux/highmem.h
+index 832b49b50..d9321fb83 100644
+--- a/include/linux/highmem.h
++++ b/include/linux/highmem.h
+@@ -12,6 +12,7 @@
+ #include <asm/cacheflush.h>
+ 
+ #include "highmem-internal.h"
++#include "../../drivers/misc/experiment/exp.h"
+ 
+ /**
+  * kmap - Map a page for long term usage
+@@ -257,6 +258,9 @@ static inline void copy_user_highpage(struct page *to, struct page *from,
+ 	copy_user_page(vto, vfrom, vaddr, to);
+ 	kunmap_atomic(vto);
+ 	kunmap_atomic(vfrom);
++	if (timer_state == TIMER_ON) {
++		atomic_long_inc(&bpage_cnt);
++	}
+ }
+ 
+ #endif
+@@ -272,6 +276,9 @@ static inline void copy_highpage(struct page *to, struct page *from)
+ 	copy_page(vto, vfrom);
+ 	kunmap_atomic(vto);
+ 	kunmap_atomic(vfrom);
++	if (timer_state == TIMER_ON) {
++		atomic_long_inc(&bpage_cnt);
++	}
+ }
+ 
+ #endif
+diff --git a/include/linux/migrate.h b/include/linux/migrate.h
+index 6cc3a47fb..271500176 100644
+--- a/include/linux/migrate.h
++++ b/include/linux/migrate.h
+@@ -45,6 +45,9 @@ extern int migrate_page(struct address_space *mapping,
+ extern int migrate_pages(struct list_head *l, new_page_t new, free_page_t free,
+ 		unsigned long private, enum migrate_mode mode, int reason,
+ 		unsigned int *nr_succeeded);
++extern int migrate_pages_concur(struct list_head *from, new_page_t get_new_page,
++	free_page_t put_new_page, unsigned long private,
++	enum migrate_mode mode, int reason, unsigned int *nr_succeeded);
+ 
+ extern int demotion_migrate_pages(struct list_head *l, new_page_t new, free_page_t free,
+ 		unsigned long private, enum migrate_mode mode, int reason,
+@@ -69,6 +72,10 @@ static inline int migrate_pages(struct list_head *l, new_page_t new,
+ 		free_page_t free, unsigned long private, enum migrate_mode mode,
+ 		int reason, unsigned int *nr_succeeded)
+ 	{ return -ENOSYS; }
++static inline int migrate_pages_concur(struct list_head *from, new_page_t get_new_page,
++		free_page_t put_new_page, unsigned long private,
++		enum migrate_mode mode, int reason, unsigned int *nr_succeeded)
++	{ return -ENOSYS; }
+ static inline struct page *alloc_migration_target(struct page *page,
+ 		unsigned long private)
+ 	{ return NULL; }
+diff --git a/include/linux/nomad2.h b/include/linux/nomad2.h
+index f3bba0803..b96e53bad 100644
+--- a/include/linux/nomad2.h
++++ b/include/linux/nomad2.h
+@@ -1,9 +1,11 @@
+ #ifndef _LINUX_NOMAD2_H
+ #define _LINUX_NOMAD2_H
+ 
+-#if CONFIG_X86_64 && !CONFIG_X86_5LEVEL
++#include <asm/pgtable_types.h>
+ 
+-#define _PAGE_BIT_ORIGINALLY_WRITABLE 52 /* used for non-exclusive mapping */
++#if CONFIG_X86_64
++
++#define _PAGE_BIT_ORIGINALLY_WRITABLE _PAGE_BIT_SOFT_DIRTY /* used for non-exclusive mapping */
+ #define _PAGE_ORIGINALLY_WRITABLE	(_AT(u64, 1) << _PAGE_BIT_ORIGINALLY_WRITABLE)
+ 
+ static inline int pte_orig_writable(pte_t pte)
+diff --git a/include/linux/sched.h b/include/linux/sched.h
+index 28a98fc4d..ebc136805 100644
+--- a/include/linux/sched.h
++++ b/include/linux/sched.h
+@@ -67,6 +67,31 @@ struct signal_struct;
+ struct task_delay_info;
+ struct task_group;
+ 
++#ifdef CONFIG_PAGE_MIGRATION_PROFILE
++struct move_pages_breakdown {
++	unsigned long long last_timestamp;
++
++	unsigned long long syscall_timestamp;
++	unsigned long long check_rights_cycles;
++	unsigned long long migrate_prep_cycles;
++	unsigned long long form_page_node_info_cycles;
++	unsigned long long form_physical_page_list_cycles;
++	unsigned long long enter_unmap_and_move_cycles;
++	unsigned long long split_thp_page_cycles;
++	unsigned long long get_new_page_cycles;
++	unsigned long long lock_page_cycles;
++	unsigned long long unmap_page_cycles;
++	unsigned long long change_page_mapping_cycles;
++	unsigned long long copy_page_cycles;
++	unsigned long long remove_migration_ptes_cycles;
++	unsigned long long putback_old_page_cycles;
++	unsigned long long putback_new_page_cycles;
++	unsigned long long migrate_pages_cleanup_cycles;
++	unsigned long long store_page_status_cycles;
++	unsigned long long return_to_syscall_cycles;
++};
++#endif
++
+ /*
+  * Task state bitmask. NOTE! These bits are also
+  * encoded in fs/proc/array.c: get_task_state().
+@@ -942,6 +967,10 @@ struct task_struct {
+ 	/* Empty if CONFIG_POSIX_CPUTIMERS=n */
+ 	struct posix_cputimers		posix_cputimers;
+ 
++#ifdef CONFIG_PAGE_MIGRATION_PROFILE
++	struct move_pages_breakdown move_pages_breakdown;
++#endif
++
+ #ifdef CONFIG_POSIX_CPU_TIMERS_TASK_WORK
+ 	struct posix_cputimers_work	posix_cputimers_work;
+ #endif
+diff --git a/include/linux/sysctl.h b/include/linux/sysctl.h
+index d99ca9983..f7790069e 100644
+--- a/include/linux/sysctl.h
++++ b/include/linux/sysctl.h
+@@ -40,6 +40,7 @@ struct ctl_dir;
+ /* Keep the same order as in fs/proc/proc_sysctl.c */
+ #define SYSCTL_ZERO	((void *)&sysctl_vals[0])
+ #define SYSCTL_ONE	((void *)&sysctl_vals[1])
++#define SYSCTL_THREE	((void *)&sysctl_vals[2])
+ #define SYSCTL_INT_MAX	((void *)&sysctl_vals[2])
+ 
+ extern const int sysctl_vals[];
+@@ -244,4 +245,7 @@ static inline void do_sysctl_args(void)
+ int sysctl_max_threads(struct ctl_table *table, int write, void *buffer,
+ 		size_t *lenp, loff_t *ppos);
+ 
++extern int sysctl_dsa_state_handler(struct ctl_table *table, int write,
++	void *buffer, size_t *lenp, loff_t *ppos);
++
+ #endif /* _LINUX_SYSCTL_H */
+diff --git a/include/trace/events/migrate.h b/include/trace/events/migrate.h
+index 779f3fad9..034adee57 100644
+--- a/include/trace/events/migrate.h
++++ b/include/trace/events/migrate.h
+@@ -49,10 +49,10 @@ TRACE_EVENT(mm_migrate_pages,
+ 
+ 	TP_PROTO(unsigned long succeeded, unsigned long failed,
+ 		 unsigned long thp_succeeded, unsigned long thp_failed,
+-		 unsigned long thp_split, enum migrate_mode mode, int reason),
++		 unsigned long thp_split, enum migrate_mode mode, int reason, const char *func_name),
+ 
+ 	TP_ARGS(succeeded, failed, thp_succeeded, thp_failed,
+-		thp_split, mode, reason),
++		thp_split, mode, reason, func_name),
+ 
+ 	TP_STRUCT__entry(
+ 		__field(	unsigned long,		succeeded)
+@@ -62,6 +62,7 @@ TRACE_EVENT(mm_migrate_pages,
+ 		__field(	unsigned long,		thp_split)
+ 		__field(	enum migrate_mode,	mode)
+ 		__field(	int,			reason)
++		__field(	const char *,		func_name) 
+ 	),
+ 
+ 	TP_fast_assign(
+@@ -72,9 +73,11 @@ TRACE_EVENT(mm_migrate_pages,
+ 		__entry->thp_split	= thp_split;
+ 		__entry->mode		= mode;
+ 		__entry->reason		= reason;
++		__entry->func_name	= func_name;
+ 	),
+ 
+-	TP_printk("nr_succeeded=%lu nr_failed=%lu nr_thp_succeeded=%lu nr_thp_failed=%lu nr_thp_split=%lu mode=%s reason=%s",
++	TP_printk("func=%s nr_succeeded=%lu nr_failed=%lu nr_thp_succeeded=%lu nr_thp_failed=%lu nr_thp_split=%lu mode=%s reason=%s",
++		__entry->func_name,
+ 		__entry->succeeded,
+ 		__entry->failed,
+ 		__entry->thp_succeeded,
+diff --git a/kernel/sysctl.c b/kernel/sysctl.c
+index 4f236326b..461cbafc6 100644
+--- a/kernel/sysctl.c
++++ b/kernel/sysctl.c
+@@ -106,6 +106,16 @@
+ 
+ #if defined(CONFIG_SYSCTL)
+ 
++extern int cpu_multi_copy_pages;
++extern int use_concur_to_compact;
++extern unsigned int limit_mt_num;
++extern int dsa_state;
++extern int use_dsa_copy_pages;
++extern int limit_chans;
++extern int dsa_copy_threshold;
++extern int dsa_async_mode;
++extern int dsa_sync_mode;
++
+ /* Constants used for minimum and  maximum */
+ #ifdef CONFIG_LOCKUP_DETECTOR
+ static int sixty = 60;
+@@ -2817,6 +2827,81 @@ static struct ctl_table vm_table[] = {
+ 		.extra2			= SYSCTL_ONE,
+ 	},
+ #endif
++	{
++		.procname	= "cpu_multi_copy_pages",
++		.data		= &cpu_multi_copy_pages,
++		.maxlen		= sizeof(cpu_multi_copy_pages),
++		.mode		= 0644,
++		.proc_handler	= proc_dointvec_minmax,
++		.extra1		= SYSCTL_ZERO,
++		.extra2		= SYSCTL_ONE,
++	},
++	{
++		.procname	= "use_concur_to_compact",
++		.data		= &use_concur_to_compact,
++		.maxlen		= sizeof(use_concur_to_compact),
++		.mode		= 0644,
++		.proc_handler	= proc_dointvec_minmax,
++		.extra1		= SYSCTL_ZERO,
++		.extra2		= SYSCTL_ONE,
++	},
++	{
++		.procname	= "limit_mt_num",
++		.data		= &limit_mt_num,
++		.maxlen		= sizeof(limit_mt_num),
++		.mode		= 0644,
++		.proc_handler	= proc_douintvec,
++	},
++	{
++		.procname	= "dsa_state",
++		.data		= &dsa_state,
++		.maxlen		= sizeof(dsa_state),
++		.mode		= 0644,
++		.proc_handler	= sysctl_dsa_state_handler,
++		.extra1		= SYSCTL_ZERO,
++		.extra2		= SYSCTL_ONE,
++	},
++	{
++		.procname	= "use_dsa_copy_pages",
++		.data		= &use_dsa_copy_pages,
++		.maxlen		= sizeof(use_dsa_copy_pages),
++		.mode		= 0644,
++		.proc_handler	= proc_dointvec_minmax,
++		.extra1		= SYSCTL_ZERO,
++		.extra2		= SYSCTL_ONE,
++	},
++	{
++		.procname	= "limit_chans",
++		.data		= &limit_chans,
++		.maxlen		= sizeof(limit_chans),
++		.mode		= 0644,
++		.proc_handler	= proc_dointvec,
++	},
++	{
++		.procname	= "dsa_copy_threshold",
++		.data		= &dsa_copy_threshold,
++		.maxlen		= sizeof(dsa_copy_threshold),
++		.mode		= 0644,
++		.proc_handler	= proc_dointvec,
++	},
++	{
++		.procname	= "dsa_async_mode",
++		.data		= &dsa_async_mode,
++		.maxlen		= sizeof(dsa_async_mode),
++		.mode		= 0644,
++		.proc_handler	= proc_dointvec_minmax,
++		.extra1		= SYSCTL_ZERO,
++		.extra2		= SYSCTL_ONE,
++	},
++	{
++		.procname	= "dsa_sync_mode",
++		.data		= &dsa_sync_mode,
++		.maxlen		= sizeof(dsa_sync_mode),
++		.mode		= 0644,
++		.proc_handler	= proc_dointvec_minmax,
++		.extra1		= SYSCTL_ZERO,
++		.extra2		= SYSCTL_THREE,
++	},
+ 	 {
+ 		.procname	= "hugetlb_shm_group",
+ 		.data		= &sysctl_hugetlb_shm_group,
+diff --git a/mm/Kconfig b/mm/Kconfig
+index 02d44e342..dfa9e51a9 100644
+--- a/mm/Kconfig
++++ b/mm/Kconfig
+@@ -294,6 +294,12 @@ config HUGETLB_PAGE_SIZE_VARIABLE
+ config CONTIG_ALLOC
+ 	def_bool (MEMORY_ISOLATION && COMPACTION) || CMA
+ 
++config PAGE_MIGRATION_PROFILE
++	bool "Page migration profile"
++	def_bool n
++	help
++	  Profile migrate hugepages with multiple optimizations to get higher throughput.
++
+ config PHYS_ADDR_T_64BIT
+ 	def_bool 64BIT
+ 
+diff --git a/mm/Makefile b/mm/Makefile
+index bf71e295e..4668a5bd2 100644
+--- a/mm/Makefile
++++ b/mm/Makefile
+@@ -64,6 +64,7 @@ memory-hotplug-$(CONFIG_MEMORY_HOTPLUG) += memory_hotplug.o
+ obj-y += page-alloc.o
+ obj-y += init-mm.o
+ obj-y += memblock.o
++obj-y += copy_page.o
+ obj-y += $(memory-hotplug-y)
+ 
+ ifdef CONFIG_MMU
+diff --git a/mm/compaction.c b/mm/compaction.c
+index 43830a025..f41d6cc72 100644
+--- a/mm/compaction.c
++++ b/mm/compaction.c
+@@ -2273,6 +2273,8 @@ bool compaction_zonelist_suitable(struct alloc_context *ac, int order,
+ 	return false;
+ }
+ 
++int use_concur_to_compact = 0;
++
+ static enum compact_result
+ compact_zone(struct compact_control *cc, struct capture_control *capc)
+ {
+@@ -2399,9 +2401,14 @@ compact_zone(struct compact_control *cc, struct capture_control *capc)
+ 			last_migrated_pfn = iteration_start_pfn;
+ 		}
+ 
+-		err = migrate_pages(&cc->migratepages, compaction_alloc,
+-				compaction_free, (unsigned long)cc, cc->mode,
+-				MR_COMPACTION, &nr_succeeded);
++		if (use_concur_to_compact)
++			err = migrate_pages_concur(&cc->migratepages, compaction_alloc,
++					compaction_free, (unsigned long)cc, cc->mode,
++					MR_COMPACTION, &nr_succeeded);
++		else
++			err = migrate_pages(&cc->migratepages, compaction_alloc,
++					compaction_free, (unsigned long)cc, cc->mode,
++					MR_COMPACTION, &nr_succeeded);
+ 
+ 		trace_mm_compaction_migratepages(cc->nr_migratepages, err,
+ 							&cc->migratepages);
+diff --git a/mm/copy_page.c b/mm/copy_page.c
+new file mode 100644
+index 000000000..a7cc3382a
+--- /dev/null
++++ b/mm/copy_page.c
+@@ -0,0 +1,248 @@
++/*
++ * Parallel page copy routine.
++ * Use DMA engine to copy page data
++ *
++ * Zi Yan <zi.yan@cs.rutgers.edu>
++ *
++ */
++
++#include <linux/highmem.h>
++#include <linux/workqueue.h>
++#include <linux/slab.h>
++#include <linux/freezer.h>
++
++unsigned int limit_mt_num = 4;
++
++/* ======================== multi-threaded copy page ======================== */
++
++struct copy_item {
++	char *to;
++	char *from;
++	unsigned long chunk_size;
++};
++
++struct copy_page_info {
++	struct work_struct copy_page_work;
++	unsigned long num_items;
++	struct copy_item item_list[0];
++};
++
++static void copy_page_routine(char *vto, char *vfrom,
++	unsigned long chunk_size)
++{
++	memcpy(vto, vfrom, chunk_size);
++}
++
++static void copy_page_work_queue_thread(struct work_struct *work)
++{
++	struct copy_page_info *my_work = (struct copy_page_info *)work;
++	int i;
++
++	for (i = 0; i < my_work->num_items; ++i)
++		copy_page_routine(my_work->item_list[i].to,
++						  my_work->item_list[i].from,
++						  my_work->item_list[i].chunk_size);
++}
++
++int copy_page_multithread(struct page *to, struct page *from, int nr_pages)
++{
++	unsigned int total_mt_num = limit_mt_num;
++#ifdef CONFIG_PAGE_MIGRATION_PROFILE
++	int to_node = page_to_nid(to);
++#else
++	int to_node = numa_node_id();
++#endif
++	int i;
++	struct copy_page_info *work_items[32] = {0};
++	char *vto, *vfrom;
++	unsigned long chunk_size;
++	const struct cpumask *per_node_cpumask = cpumask_of_node(to_node);
++	int cpu_id_list[32] = {0};
++	int cpu;
++	int err = 0;
++
++	total_mt_num = min_t(unsigned int, total_mt_num,
++						 cpumask_weight(per_node_cpumask));
++	if (total_mt_num > 1)
++		total_mt_num = (total_mt_num / 2) * 2;
++
++	if (total_mt_num > 32 || total_mt_num < 1)
++		return -ENODEV;
++
++	for (cpu = 0; cpu < total_mt_num; ++cpu) {
++		work_items[cpu] = kzalloc(sizeof(struct copy_page_info)
++						+ sizeof(struct copy_item), GFP_KERNEL);
++		if (!work_items[cpu]) {
++			err = -ENOMEM;
++			goto free_work_items;
++		}
++	}
++
++	i = 0;
++	for_each_cpu(cpu, per_node_cpumask) {
++		if (i >= total_mt_num)
++			break;
++		cpu_id_list[i] = cpu;
++		++i;
++	}
++
++	vfrom = kmap(from);
++	vto = kmap(to);
++	chunk_size = PAGE_SIZE*nr_pages / total_mt_num;
++
++	for (i = 0; i < total_mt_num; ++i) {
++		INIT_WORK((struct work_struct *)work_items[i],
++				  copy_page_work_queue_thread);
++
++		work_items[i]->num_items = 1;
++		work_items[i]->item_list[0].to = vto + i * chunk_size;
++		work_items[i]->item_list[0].from = vfrom + i * chunk_size;
++		work_items[i]->item_list[0].chunk_size = chunk_size;
++
++		queue_work_on(cpu_id_list[i],
++					  system_highpri_wq,
++					  (struct work_struct *)work_items[i]);
++	}
++
++	/* Wait until it finishes  */
++	for (i = 0; i < total_mt_num; ++i)
++		flush_work((struct work_struct *)work_items[i]);
++
++	kunmap(to);
++	kunmap(from);
++
++free_work_items:
++	for (cpu = 0; cpu < total_mt_num; ++cpu)
++		if (work_items[cpu])
++			kfree(work_items[cpu]);
++
++	return err;
++}
++
++int copy_page_lists_mt(struct page **to, struct page **from, int nr_items)
++{
++	int err = 0;
++	unsigned int total_mt_num = limit_mt_num;
++#ifdef CONFIG_PAGE_MIGRATION_PROFILE
++	int to_node = page_to_nid(*to);
++#else
++	int to_node = numa_node_id();
++#endif
++	int i;
++	struct copy_page_info *work_items[32] = {0};
++	const struct cpumask *per_node_cpumask = cpumask_of_node(to_node);
++	int cpu_id_list[32] = {0};
++	int cpu;
++	int max_items_per_thread;
++	int item_idx;
++
++	total_mt_num = min_t(unsigned int, total_mt_num,
++						 cpumask_weight(per_node_cpumask));
++
++
++	if (total_mt_num > 32)
++		return -ENODEV;
++
++	/* Each threads get part of each page, if nr_items < totla_mt_num */
++	if (nr_items < total_mt_num)
++		max_items_per_thread = nr_items;
++	else
++		max_items_per_thread = (nr_items / total_mt_num) +
++				((nr_items % total_mt_num)?1:0);
++
++
++	for (cpu = 0; cpu < total_mt_num; ++cpu) {
++		work_items[cpu] = kzalloc(sizeof(struct copy_page_info) +
++					sizeof(struct copy_item)*max_items_per_thread, GFP_KERNEL);
++		if (!work_items[cpu]) {
++			err = -ENOMEM;
++			goto free_work_items;
++		}
++	}
++
++	i = 0;
++	for_each_cpu(cpu, per_node_cpumask) {
++		if (i >= total_mt_num)
++			break;
++		cpu_id_list[i] = cpu;
++		++i;
++	}
++
++	if (nr_items < total_mt_num) {
++		for (cpu = 0; cpu < total_mt_num; ++cpu) {
++			INIT_WORK((struct work_struct *)work_items[cpu],
++					  copy_page_work_queue_thread);
++			work_items[cpu]->num_items = max_items_per_thread;
++		}
++
++		for (item_idx = 0; item_idx < nr_items; ++item_idx) {
++			unsigned long chunk_size = PAGE_SIZE * thp_nr_pages(from[item_idx]) / total_mt_num;
++			char *vfrom = kmap(from[item_idx]);
++			char *vto = kmap(to[item_idx]);
++			VM_BUG_ON(PAGE_SIZE * thp_nr_pages(from[item_idx]) % total_mt_num);
++			BUG_ON(thp_nr_pages(to[item_idx]) !=
++				   thp_nr_pages(from[item_idx]));
++
++			for (cpu = 0; cpu < total_mt_num; ++cpu) {
++				work_items[cpu]->item_list[item_idx].to = vto + chunk_size * cpu;
++				work_items[cpu]->item_list[item_idx].from = vfrom + chunk_size * cpu;
++				work_items[cpu]->item_list[item_idx].chunk_size =
++					chunk_size;
++			}
++		}
++
++		for (cpu = 0; cpu < total_mt_num; ++cpu)
++			queue_work_on(cpu_id_list[cpu],
++						  system_highpri_wq,
++						  (struct work_struct *)work_items[cpu]);
++	} else {
++		item_idx = 0;
++		for (cpu = 0; cpu < total_mt_num; ++cpu) {
++			int num_xfer_per_thread = nr_items / total_mt_num;
++			int per_cpu_item_idx;
++
++			if (cpu < (nr_items % total_mt_num))
++				num_xfer_per_thread += 1;
++
++			INIT_WORK((struct work_struct *)work_items[cpu],
++					  copy_page_work_queue_thread);
++
++			work_items[cpu]->num_items = num_xfer_per_thread;
++			for (per_cpu_item_idx = 0; per_cpu_item_idx < work_items[cpu]->num_items;
++				 ++per_cpu_item_idx, ++item_idx) {
++				work_items[cpu]->item_list[per_cpu_item_idx].to = kmap(to[item_idx]);
++				work_items[cpu]->item_list[per_cpu_item_idx].from =
++					kmap(from[item_idx]);
++				work_items[cpu]->item_list[per_cpu_item_idx].chunk_size =
++					PAGE_SIZE * thp_nr_pages(from[item_idx]);
++
++				BUG_ON(thp_nr_pages(to[item_idx]) !=
++					   thp_nr_pages(from[item_idx]));
++			}
++
++			queue_work_on(cpu_id_list[cpu],
++						  system_highpri_wq,
++						  (struct work_struct *)work_items[cpu]);
++		}
++		if (item_idx != nr_items)
++			pr_err("%s: only %d out of %d pages are transferred\n", __func__,
++				item_idx - 1, nr_items);
++	}
++
++	/* Wait until it finishes  */
++	for (i = 0; i < total_mt_num; ++i)
++		flush_work((struct work_struct *)work_items[i]);
++
++	for (i = 0; i < nr_items; ++i) {
++			kunmap(to[i]);
++			kunmap(from[i]);
++	}
++
++free_work_items:
++	for (cpu = 0; cpu < total_mt_num; ++cpu)
++		if (work_items[cpu])
++			kfree(work_items[cpu]);
++
++	return err;
++}
++
+diff --git a/mm/internal.h b/mm/internal.h
+index 0344cd78e..136bf4d93 100644
+--- a/mm/internal.h
++++ b/mm/internal.h
+@@ -647,4 +647,8 @@ int vmap_pages_range_noflush(unsigned long addr, unsigned long end,
+ 
+ void vunmap_range_noflush(unsigned long start, unsigned long end);
+ 
++extern int copy_page_lists_mt(struct page **to,
++			struct page **from, int nr_pages);
++extern int copy_page_multithread(struct page *to, struct page *from, int nr_pages);
++
+ #endif	/* __MM_INTERNAL_H */
+diff --git a/mm/migrate.c b/mm/migrate.c
+index ee780f39b..2dd4e5436 100644
+--- a/mm/migrate.c
++++ b/mm/migrate.c
+@@ -59,6 +59,15 @@
+ #include <trace/events/migrate.h>
+ 
+ #include "internal.h"
++#include "../drivers/misc/experiment/exp.h"
++
++struct page_migration_work_item {
++	struct list_head list;
++	struct page *old_page;
++	struct page *new_page;
++	struct anon_vma *anon_vma;
++	int page_was_mapped;
++};
+ 
+ int isolate_movable_page(struct page *page, isolate_mode_t mode)
+ {
+@@ -652,6 +661,8 @@ int migrate_huge_page_move_mapping(struct address_space *mapping,
+ 	return MIGRATEPAGE_SUCCESS;
+ }
+ 
++int cpu_multi_copy_pages = 0;
++
+ /*
+  * Gigantic pages are so large that we do not guarantee that page++ pointer
+  * arithmetic will work across the entire page.  We need something more
+@@ -674,10 +685,41 @@ static void __copy_gigantic_page(struct page *dst, struct page *src,
+ 	}
+ }
+ 
+-static void copy_huge_page(struct page *dst, struct page *src)
+-{
+-	int i;
++static void copy_huge_page_extra(struct page *dst, struct page *src, int nr_pages) {
++	long i = 0;
++	int rc = -1;
++
++	if (use_dsa_copy_pages) {
++		rc = dsa_multi_copy_pages(dst, src, nr_pages);
++		if (unlikely(rc != 0)) {
++			atomic_long_inc(&dsa_copy_fail);
++		}
++		if (rc == 0 && timer_state == TIMER_ON) {
++			atomic_long_inc(&dsa_hpage_cnt);
++		}
++	} 
++	else if (cpu_multi_copy_pages) {
++		rc = copy_page_multithread(dst, src, nr_pages);
++		if (rc == 0 && timer_state == TIMER_ON) {
++			atomic_long_inc(&hpage_cnt);
++		}
++	}
++
++	if (rc) {
++		for (i = 0; i < nr_pages; i++) {
++			cond_resched();
++			copy_highpage(nth_page(dst, i), nth_page(src, i));
++		}
++		if (timer_state == TIMER_ON) {
++			atomic_long_inc(&hpage_cnt);
++		}
++	}
++}
++
++static void copy_huge_page(struct page *dst, struct page *src) {
+ 	int nr_pages;
++	ktime_t start, end;
++	unsigned long flags;
+ 
+ 	if (PageHuge(src)) {
+ 		/* hugetlbfs page */
+@@ -694,9 +736,19 @@ static void copy_huge_page(struct page *dst, struct page *src)
+ 		nr_pages = thp_nr_pages(src);
+ 	}
+ 
+-	for (i = 0; i < nr_pages; i++) {
+-		cond_resched();
+-		copy_highpage(dst + i, src + i);
++	if (timer_state == TIMER_ON) {
++
++		start = ktime_get();
++		copy_huge_page_extra(dst, src, nr_pages);
++		end = ktime_get();
++
++		last_time = ktime_sub(end, start);
++		last_cnt = nr_pages;
++		spin_lock_irqsave(&timer_lock, flags);
++		total_time = ktime_add(total_time, last_time);
++		spin_unlock_irqrestore(&timer_lock, flags);
++	} else {
++		copy_huge_page_extra(dst, src, nr_pages);
+ 	}
+ }
+ 
+@@ -1620,6 +1672,7 @@ int migrate_pages(struct list_head *from, new_page_t get_new_page,
+ 	int rc, nr_subpages;
+ 	LIST_HEAD(ret_pages);
+ 
++	*nr_succeeded = 0;
+ 	trace_mm_migrate_pages_start(mode, reason);
+ 
+ 	if (!swapwrite)
+@@ -1699,10 +1752,11 @@ int migrate_pages(struct list_head *from, new_page_t get_new_page,
+ 
+ 					nr_thp_failed++;
+ 					nr_failed += nr_subpages;
+-					goto out;
++					count_vm_events(PGMIGRATE_NOMEM_FAIL, nr_subpages);
++				} else {
++					nr_failed++;
++					count_vm_events(PGMIGRATE_NOMEM_FAIL, 1);
+ 				}
+-				nr_failed++;
+-				count_vm_events(PGMIGRATE_NOMEM_FAIL, thp_nr_pages(page));
+ 				goto out;
+ 			case -EAGAIN:
+ 				if (is_thp) {
+@@ -1752,7 +1806,7 @@ int migrate_pages(struct list_head *from, new_page_t get_new_page,
+ 	count_vm_events(THP_MIGRATION_FAIL, nr_thp_failed);
+ 	count_vm_events(THP_MIGRATION_SPLIT, nr_thp_split);
+ 	trace_mm_migrate_pages(*nr_succeeded, nr_failed, nr_thp_succeeded,
+-			       nr_thp_failed, nr_thp_split, mode, reason);
++			       nr_thp_failed, nr_thp_split, mode, reason, "migrate_pages");
+ 
+ 	if (!swapwrite)
+ 		current->flags &= ~PF_SWAPWRITE;
+@@ -1760,6 +1814,696 @@ int migrate_pages(struct list_head *from, new_page_t get_new_page,
+ 	return rc;
+ }
+ 
++static int __unmap_page_concur(struct page *page, struct page *newpage,
++				struct anon_vma **anon_vma,
++				int *page_was_mapped,
++				int force, enum migrate_mode mode)
++{
++	int rc = -EAGAIN;
++	bool is_lru = !__PageMovable(page);
++#ifdef CONFIG_PAGE_MIGRATION_PROFILE
++	u64 timestamp;
++#endif
++
++	*anon_vma = NULL;
++	*page_was_mapped = 0;
++
++	if (!trylock_page(page)) {
++		if (!force || mode == MIGRATE_ASYNC)
++			goto out;
++
++		/*
++		 * It's not safe for direct compaction to call lock_page.
++		 * For example, during page readahead pages are added locked
++		 * to the LRU. Later, when the IO completes the pages are
++		 * marked uptodate and unlocked. However, the queueing
++		 * could be merging multiple pages for one bio (e.g.
++		 * mpage_readpages). If an allocation happens for the
++		 * second or third page, the process can end up locking
++		 * the same page twice and deadlocking. Rather than
++		 * trying to be clever about what pages can be locked,
++		 * avoid the use of lock_page for direct compaction
++		 * altogether.
++		 */
++		if (current->flags & PF_MEMALLOC)
++			goto out;
++
++		lock_page(page);
++	}
++
++	/* We are working on page_mapping(page) == NULL */
++	VM_BUG_ON_PAGE(PageWriteback(page), page);
++#if 0
++	if (PageWriteback(page)) {
++		/*
++		 * Only in the case of a full synchronous migration is it
++		 * necessary to wait for PageWriteback. In the async case,
++		 * the retry loop is too short and in the sync-light case,
++		 * the overhead of stalling is too much
++		 */
++		if ((mode & MIGRATE_MODE_MASK) != MIGRATE_SYNC) {
++			rc = -EBUSY;
++			goto out_unlock;
++		}
++		if (!force)
++			goto out_unlock;
++		wait_on_page_writeback(page);
++	}
++#endif
++
++	/*
++	 * By try_to_unmap(), page->mapcount goes down to 0 here. In this case,
++	 * we cannot notice that anon_vma is freed while we migrates a page.
++	 * This get_anon_vma() delays freeing anon_vma pointer until the end
++	 * of migration. File cache pages are no problem because of page_lock()
++	 * File Caches may use write_page() or lock_page() in migration, then,
++	 * just care Anon page here.
++	 *
++	 * Only page_get_anon_vma() understands the subtleties of
++	 * getting a hold on an anon_vma from outside one of its mms.
++	 * But if we cannot get anon_vma, then we won't need it anyway,
++	 * because that implies that the anon page is no longer mapped
++	 * (and cannot be remapped so long as we hold the page lock).
++	 */
++	if (PageAnon(page) && !PageKsm(page))
++		*anon_vma = page_get_anon_vma(page);
++
++	/*
++	 * Block others from accessing the new page when we get around to
++	 * establishing additional references. We are usually the only one
++	 * holding a reference to newpage at this point. We used to have a BUG
++	 * here if trylock_page(newpage) fails, but would like to allow for
++	 * cases where there might be a race with the previous use of newpage.
++	 * This is much like races on refcount of oldpage: just don't BUG().
++	 */
++	if (unlikely(!trylock_page(newpage)))
++		goto out_unlock;
++
++	if (unlikely(!is_lru)) {
++		/* Just migrate the page and remove it from item list */
++		VM_BUG_ON(1);
++		rc = move_to_new_page(newpage, page, mode);
++		goto out_unlock_both;
++	}
++
++#ifdef CONFIG_PAGE_MIGRATION_PROFILE
++	timestamp = rdtsc();
++	current->move_pages_breakdown.lock_page_cycles += timestamp -
++		current->move_pages_breakdown.last_timestamp;
++	current->move_pages_breakdown.last_timestamp = timestamp;
++#endif
++
++	/*
++	 * Corner case handling:
++	 * 1. When a new swap-cache page is read into, it is added to the LRU
++	 * and treated as swapcache but it has no rmap yet.
++	 * Calling try_to_unmap() against a page->mapping==NULL page will
++	 * trigger a BUG.  So handle it here.
++	 * 2. An orphaned page (see truncate_complete_page) might have
++	 * fs-private metadata. The page can be picked up due to memory
++	 * offlining.  Everywhere else except page reclaim, the page is
++	 * invisible to the vm, so the page can not be migrated.  So try to
++	 * free the metadata, so the page can be freed.
++	 */
++	if (!page->mapping) {
++		VM_BUG_ON_PAGE(PageAnon(page), page);
++		if (page_has_private(page)) {
++			try_to_free_buffers(page);
++			goto out_unlock_both;
++		}
++	} else if (page_mapped(page)) {
++		/* Establish migration ptes */
++		VM_BUG_ON_PAGE(PageAnon(page) && !PageKsm(page) && !*anon_vma,
++				page);
++		try_to_unmap(page, TTU_MIGRATION|TTU_IGNORE_MLOCK);
++		*page_was_mapped = 1;
++	}
++
++#ifdef CONFIG_PAGE_MIGRATION_PROFILE
++	timestamp = rdtsc();
++	current->move_pages_breakdown.unmap_page_cycles += timestamp -
++		current->move_pages_breakdown.last_timestamp;
++	current->move_pages_breakdown.last_timestamp = timestamp;
++#endif
++
++	return MIGRATEPAGE_SUCCESS;
++
++out_unlock_both:
++	unlock_page(newpage);
++out_unlock:
++	/* Drop an anon_vma reference if we took one */
++	if (*anon_vma)
++		put_anon_vma(*anon_vma);
++	unlock_page(page);
++out:
++	return rc;
++}
++
++static int unmap_pages_and_get_new_concur(new_page_t get_new_page,
++				free_page_t put_new_page, unsigned long private,
++				struct page_migration_work_item *item,
++				int force, enum migrate_mode mode, 
++				enum migrate_reason reason, struct list_head *ret)
++{
++	int rc = MIGRATEPAGE_SUCCESS;
++#ifdef CONFIG_PAGE_MIGRATION_PROFILE
++	u64 timestamp;
++#endif
++
++	if (!thp_migration_supported() && PageTransHuge(item->old_page))
++		return -ENOSYS;
++
++	if (page_count(item->old_page) == 1) {
++		/* page was freed from under us. So we are done. */
++		ClearPageActive(item->old_page);
++		ClearPageUnevictable(item->old_page);
++		if (unlikely(__PageMovable(item->old_page))) {
++			lock_page(item->old_page);
++			if (!PageMovable(item->old_page))
++				__ClearPageIsolated(item->old_page);
++			unlock_page(item->old_page);
++		}
++
++#ifdef CONFIG_PAGE_MIGRATION_PROFILE
++		timestamp = rdtsc();
++		current->move_pages_breakdown.putback_new_page_cycles += timestamp -
++			current->move_pages_breakdown.last_timestamp;
++		current->move_pages_breakdown.last_timestamp = timestamp;
++#endif
++		goto out;
++	}
++
++	item->new_page = get_new_page(item->old_page, private);
++	if (!item->new_page)
++		return -ENOMEM;
++
++#ifdef CONFIG_PAGE_MIGRATION_PROFILE
++	timestamp = rdtsc();
++	current->move_pages_breakdown.get_new_page_cycles += timestamp -
++		current->move_pages_breakdown.last_timestamp;
++	current->move_pages_breakdown.last_timestamp = timestamp;
++#endif
++
++	/* TODO: check whether Ksm pages can be demoted? */
++	if (reason == MR_DEMOTION && !PageKsm(item->old_page))
++		set_page_demoted(item->new_page);
++
++	rc = __unmap_page_concur(item->old_page, item->new_page, &item->anon_vma,
++							&item->page_was_mapped,
++							force, mode);
++	if (rc == MIGRATEPAGE_SUCCESS)
++		return rc;
++
++out:
++	if (rc != -EAGAIN) {
++		list_del(&item->old_page->lru);
++	}
++
++	if (rc == MIGRATEPAGE_SUCCESS) {
++		/* only for pages freed under us  */
++		VM_BUG_ON(page_count(item->old_page) != 1);
++
++		if (likely(!__PageMovable(item->old_page)))
++			mod_node_page_state(page_pgdat(item->old_page), NR_ISOLATED_ANON +
++					page_is_file_lru(item->old_page), -thp_nr_pages(item->old_page));
++		if (reason != MR_MEMORY_FAILURE)
++			put_page(item->old_page);
++		item->old_page = NULL;
++#ifdef CONFIG_PAGE_MIGRATION_PROFILE
++		timestamp = rdtsc();
++		current->move_pages_breakdown.putback_old_page_cycles += timestamp -
++			current->move_pages_breakdown.last_timestamp;
++		current->move_pages_breakdown.last_timestamp = timestamp;
++#endif
++	} else {
++		if (rc != -EAGAIN) 
++			list_add_tail(&item->old_page->lru, ret);
++
++#ifdef CONFIG_PAGE_MIGRATION_PROFILE
++		timestamp = rdtsc();
++		current->move_pages_breakdown.putback_old_page_cycles += timestamp -
++			current->move_pages_breakdown.last_timestamp;
++		current->move_pages_breakdown.last_timestamp = timestamp;
++#endif
++
++		if (put_new_page)
++			put_new_page(item->new_page, private);
++		else
++			put_page(item->new_page);
++		item->new_page = NULL;
++
++#ifdef CONFIG_PAGE_MIGRATION_PROFILE
++		timestamp = rdtsc();
++		current->move_pages_breakdown.putback_new_page_cycles += timestamp -
++			current->move_pages_breakdown.last_timestamp;
++		current->move_pages_breakdown.last_timestamp = timestamp;
++#endif
++	}
++	return rc;
++}
++
++static int move_mapping_concurr(struct list_head *unmapped_list_ptr,
++					   struct list_head *wip_list_ptr,
++					   free_page_t put_new_page, unsigned long private,
++					   enum migrate_mode mode)
++{
++	struct page_migration_work_item *iterator, *iterator2;
++	struct address_space *mapping;
++
++	list_for_each_entry_safe(iterator, iterator2, unmapped_list_ptr, list) {
++		VM_BUG_ON_PAGE(!PageLocked(iterator->old_page), iterator->old_page);
++		VM_BUG_ON_PAGE(!PageLocked(iterator->new_page), iterator->new_page);
++
++		mapping = page_mapping(iterator->old_page);
++
++		VM_BUG_ON(mapping);
++
++		VM_BUG_ON(PageWriteback(iterator->old_page));
++
++		if (page_count(iterator->old_page) != 1) {
++			list_move(&iterator->list, wip_list_ptr);
++			if (iterator->page_was_mapped)
++				remove_migration_ptes(iterator->old_page,
++					iterator->old_page, false);
++			unlock_page(iterator->new_page);
++			if (iterator->anon_vma)
++				put_anon_vma(iterator->anon_vma);
++			unlock_page(iterator->old_page);
++
++			if (put_new_page)
++				put_new_page(iterator->new_page, private);
++			else
++				put_page(iterator->new_page);
++			iterator->new_page = NULL;
++			continue;
++		}
++
++		iterator->new_page->index = iterator->old_page->index;
++		iterator->new_page->mapping = iterator->old_page->mapping;
++		if (PageSwapBacked(iterator->old_page))
++			SetPageSwapBacked(iterator->new_page);
++	}
++
++	return 0;
++}
++
++static __always_inline int copy_page_lists(struct page **to, struct page **from, 
++				int nr_items, int hpage, int bpage) {
++	int nr_pages = 0;
++	int rc = -ENOSYS;
++
++	// max_hpage_cnt = max(hpage, max_hpage_cnt);
++	// max_bpage_cnt = max(bpage, max_bpage_cnt);
++
++	nr_pages = (hpage << 9) + bpage;
++	if (use_dsa_copy_pages && nr_pages >= dsa_copy_threshold) {
++		rc = dsa_copy_page_lists(to, from, nr_items);
++		if (unlikely(rc != 0)) {
++			atomic_long_inc(&dsa_copy_fail);
++		}
++		if (rc == 0 && timer_state == TIMER_ON) {
++			atomic_long_add(bpage, &dsa_bpage_cnt);
++			atomic_long_add(hpage, &dsa_hpage_cnt);
++		}
++	}
++	else if (cpu_multi_copy_pages) {
++		rc = copy_page_lists_mt(to, from, nr_items);
++		if (rc == 0 && timer_state == TIMER_ON) {
++			atomic_long_add(bpage, &bpage_cnt);
++			atomic_long_add(hpage, &hpage_cnt);
++		}
++	}
++
++	return rc;
++}
++
++static int copy_to_new_pages_concur(struct list_head *unmapped_list_ptr,
++				enum migrate_mode mode)
++{
++	struct page_migration_work_item *iterator;
++	int num_pages = 0, idx = 0, hpage = 0, bpage = 0, sub_pages;
++	struct page **src_page_list = NULL, **dst_page_list = NULL;
++	ktime_t start, end, duration;
++	unsigned long flags;
++	int rc = -EFAULT;
++#ifdef CONFIG_PAGE_MIGRATION_PROFILE
++	u64 timestamp;
++#endif
++
++	if (list_empty(unmapped_list_ptr))
++		return 0;
++
++	list_for_each_entry(iterator, unmapped_list_ptr, list) {
++		++num_pages;
++		sub_pages = thp_nr_pages(iterator->old_page);
++		hpage += (sub_pages > 1);
++		bpage += (sub_pages == 1);
++	}
++
++	src_page_list = kzalloc(sizeof(struct page *)*num_pages, GFP_KERNEL);
++	if (!src_page_list) {
++		BUG();
++		return -ENOMEM;
++	}
++	dst_page_list = kzalloc(sizeof(struct page *)*num_pages, GFP_KERNEL);
++	if (!dst_page_list) {
++		BUG();
++		return -ENOMEM;
++	}
++
++	list_for_each_entry(iterator, unmapped_list_ptr, list) {
++		src_page_list[idx] = iterator->old_page;
++		dst_page_list[idx] = iterator->new_page;
++		++idx;
++	}
++
++	BUG_ON(idx != num_pages);
++
++#ifdef CONFIG_PAGE_MIGRATION_PROFILE
++	timestamp = rdtsc();
++	current->move_pages_breakdown.change_page_mapping_cycles += timestamp -
++		current->move_pages_breakdown.last_timestamp;
++	current->move_pages_breakdown.last_timestamp = timestamp;
++#endif
++
++	// if (mode & MIGRATE_DMA)
++	// 	rc = copy_page_lists_dma_always(dst_page_list, src_page_list,
++	// 						num_pages);
++	// else if (mode & MIGRATE_MT)
++	if (timer_state == TIMER_ON) {
++
++		start = ktime_get();
++		rc = copy_page_lists(dst_page_list, src_page_list, num_pages, hpage, bpage);
++		end = ktime_get();
++
++		duration = ktime_sub(end, start);
++		spin_lock_irqsave(&timer_lock, flags);
++		if (rc == 0) {
++			last_time = duration;
++			last_cnt = (hpage << 9) + bpage;
++			total_time = ktime_add(total_time, duration);
++		}
++		spin_unlock_irqrestore(&timer_lock, flags);
++	} else {
++		rc = copy_page_lists(dst_page_list, src_page_list, num_pages, hpage, bpage);
++	}
++
++	if (rc) {
++		list_for_each_entry(iterator, unmapped_list_ptr, list) {
++			if (PageHuge(iterator->old_page) ||
++				PageTransHuge(iterator->old_page))
++				copy_huge_page(iterator->new_page, iterator->old_page);
++			else
++				copy_highpage(iterator->new_page, iterator->old_page);
++		}
++	}
++
++	list_for_each_entry(iterator, unmapped_list_ptr, list) {
++		migrate_page_states(iterator->new_page, iterator->old_page);
++	}
++
++#ifdef CONFIG_PAGE_MIGRATION_PROFILE
++	timestamp = rdtsc();
++	current->move_pages_breakdown.copy_page_cycles += timestamp -
++		current->move_pages_breakdown.last_timestamp;
++	current->move_pages_breakdown.last_timestamp = timestamp;
++#endif
++
++	kfree(src_page_list);
++	kfree(dst_page_list);
++
++	return 0;
++}
++
++static int remove_migration_ptes_concurr(struct list_head *unmapped_list_ptr, enum migrate_reason reason)
++{
++	struct page_migration_work_item *iterator, *iterator2;
++#ifdef CONFIG_PAGE_MIGRATION_PROFILE
++	u64 timestamp;
++#endif
++
++	list_for_each_entry_safe(iterator, iterator2, unmapped_list_ptr, list) {
++		if (iterator->page_was_mapped)
++			remove_migration_ptes(iterator->old_page, iterator->new_page, false);
++
++
++#ifdef CONFIG_PAGE_MIGRATION_PROFILE
++		timestamp = rdtsc();
++		current->move_pages_breakdown.remove_migration_ptes_cycles += timestamp -
++			current->move_pages_breakdown.last_timestamp;
++		current->move_pages_breakdown.last_timestamp = timestamp;
++#endif
++
++		unlock_page(iterator->new_page);
++
++		if (iterator->anon_vma)
++			put_anon_vma(iterator->anon_vma);
++
++		unlock_page(iterator->old_page);
++
++		list_del(&iterator->old_page->lru);
++		mod_node_page_state(page_pgdat(iterator->old_page), NR_ISOLATED_ANON +
++					page_is_file_lru(iterator->old_page), -thp_nr_pages(iterator->old_page));
++		if (reason != MR_MEMORY_FAILURE)
++			put_page(iterator->old_page);
++		iterator->old_page = NULL;
++
++#ifdef CONFIG_PAGE_MIGRATION_PROFILE
++		timestamp = rdtsc();
++		current->move_pages_breakdown.putback_old_page_cycles += timestamp -
++			current->move_pages_breakdown.last_timestamp;
++		current->move_pages_breakdown.last_timestamp = timestamp;
++#endif
++
++		if (unlikely(__PageMovable(iterator->new_page)))
++			put_page(iterator->new_page);
++		else
++			putback_lru_page(iterator->new_page);
++		iterator->new_page = NULL;
++
++#ifdef CONFIG_PAGE_MIGRATION_PROFILE
++		timestamp = rdtsc();
++		current->move_pages_breakdown.putback_new_page_cycles += timestamp -
++			current->move_pages_breakdown.last_timestamp;
++		current->move_pages_breakdown.last_timestamp = timestamp;
++#endif
++	}
++
++	return 0;
++}
++
++int migrate_pages_concur(struct list_head *from, new_page_t get_new_page,
++		free_page_t put_new_page, unsigned long private,
++		enum migrate_mode mode, int reason, unsigned int *nr_succeeded)
++{
++	int retry = 1;
++	int nr_failed = 0;
++	int nr_succeeded2 = 0;
++	int nr_thp_succeeded = 0;
++	int nr_thp_failed = 0;
++	bool is_thp = false;
++	int pass = 0;
++	struct page *page;
++	int swapwrite = current->flags & PF_SWAPWRITE;
++	int rc, nr_subpages;
++	int total_num_pages = 0, idx;
++	struct page_migration_work_item *item_list;
++	struct page_migration_work_item *iterator, *iterator2;
++	int item_list_order = 0;
++#ifdef CONFIG_PAGE_MIGRATION_PROFILE
++	u64 timestamp;
++#endif
++
++	LIST_HEAD(wip_list);
++	LIST_HEAD(unmapped_list);
++	LIST_HEAD(serialized_list);
++	LIST_HEAD(failed_list);
++	LIST_HEAD(ret_pages);
++
++	*nr_succeeded = 0;
++
++	if (!swapwrite)
++		current->flags |= PF_SWAPWRITE;
++
++	list_for_each_entry(page, from, lru)
++		++total_num_pages;
++
++	item_list_order = get_order(total_num_pages *
++		sizeof(struct page_migration_work_item));
++
++	if (item_list_order > MAX_ORDER) {
++		item_list = alloc_pages_exact(total_num_pages *
++			sizeof(struct page_migration_work_item), GFP_ATOMIC);
++		memset(item_list, 0, total_num_pages *
++			sizeof(struct page_migration_work_item));
++	} else {
++		item_list = (struct page_migration_work_item *)__get_free_pages(GFP_ATOMIC,
++						item_list_order);
++		memset(item_list, 0, PAGE_SIZE<<item_list_order);
++	}
++
++	idx = 0;
++	list_for_each_entry(page, from, lru) {
++		item_list[idx].old_page = page;
++		item_list[idx].new_page = NULL;
++		INIT_LIST_HEAD(&item_list[idx].list);
++		list_add_tail(&item_list[idx].list, &wip_list);
++		idx += 1;
++	}
++
++#ifdef CONFIG_PAGE_MIGRATION_PROFILE
++	timestamp = rdtsc();
++	current->move_pages_breakdown.enter_unmap_and_move_cycles += timestamp -
++		current->move_pages_breakdown.last_timestamp;
++	current->move_pages_breakdown.last_timestamp = timestamp;
++#endif
++
++	for (pass = 0; pass < 1 && retry; pass++) {
++		retry = 0;
++
++		/* unmap and get new page for page_mapping(page) == NULL */
++		list_for_each_entry_safe(iterator, iterator2, &wip_list, list) {
++			/*
++			 * THP statistics is based on the source huge page.
++			 * Capture required information that might get lost
++			 * during migration.
++			 */
++			is_thp = PageTransHuge(iterator->old_page) && !PageHuge(iterator->old_page);
++			nr_subpages = thp_nr_pages(iterator->old_page);
++			cond_resched();
++
++			if (iterator->new_page) {
++				pr_info("%s: iterator already has a new page?\n", __func__);
++				VM_BUG_ON_PAGE(1, iterator->old_page);
++			}
++
++			/* We do not migrate huge pages, file-backed, or swapcached pages */
++			if (PageHuge(iterator->old_page)) {
++				rc = -ENODEV;
++			}
++			else if ((page_mapping(iterator->old_page) != NULL)) {
++				rc = -ENODEV;
++			}
++			else
++				rc = unmap_pages_and_get_new_concur(get_new_page, put_new_page,
++						private, iterator, pass > 2, mode,
++						reason, &ret_pages);
++
++			switch(rc) {
++				case -ENODEV:
++					list_move(&iterator->list, &serialized_list);
++					break;
++				case -ENOMEM:
++					/*
++					* When memory is low, don't bother to try to migrate
++					* other pages, just exit.
++					*/
++					list_move(&iterator->list, &serialized_list);
++					if (is_thp) {
++						/* We no longer to try calling try_split_thp() */
++						nr_thp_failed++;
++						nr_failed += nr_subpages;
++						count_vm_events(PGMIGRATE_NOMEM_FAIL, nr_subpages);
++					} else {
++						nr_failed++;
++						count_vm_events(PGMIGRATE_NOMEM_FAIL, 1);
++					}
++					goto out;
++				case -EAGAIN:
++					retry++;
++					break;
++				case MIGRATEPAGE_SUCCESS:
++					if (iterator->old_page) {
++						list_move(&iterator->list, &unmapped_list);
++						if (is_thp) {
++							nr_thp_succeeded++;
++							*nr_succeeded += nr_subpages;
++							break;
++						}
++						(*nr_succeeded)++; /* Is absolutely successful? */
++					} else { /* pages are freed under us */
++						list_del(&iterator->list);
++					}
++					break;
++				default:
++					/*
++					* Permanent failure (-EBUSY, -ENOSYS, etc.):
++					* unlike -EAGAIN case, the failed page is
++					* removed from migration page list and not
++					* retried in the next outer loop.
++					*/
++					if (is_thp) {
++						nr_thp_failed++;
++						nr_failed += nr_subpages;
++						break;
++					}
++					list_move(&iterator->list, &failed_list);
++					nr_failed++;
++					break;
++			}
++		}
++out:
++		if (list_empty(&unmapped_list))
++			continue;
++
++#ifdef CONFIG_PAGE_MIGRATION_PROFILE
++		timestamp = rdtsc();
++		current->move_pages_breakdown.unmap_page_cycles += timestamp -
++			current->move_pages_breakdown.last_timestamp;
++		current->move_pages_breakdown.last_timestamp = timestamp;
++#endif
++
++		/* move page->mapping to new page, only -EAGAIN could happen  */
++		move_mapping_concurr(&unmapped_list, &wip_list, put_new_page, private, mode);
++
++		/* copy pages in unmapped_list */
++		copy_to_new_pages_concur(&unmapped_list, mode);
++
++		/* remove migration pte, if old_page is NULL?, unlock old and new
++		 * pages, put anon_vma, put old and new pages */
++		remove_migration_ptes_concurr(&unmapped_list, reason);
++
++	}
++	rc = nr_failed;
++
++	if (!list_empty(from))
++		rc = migrate_pages(from, get_new_page, put_new_page,
++				private, mode, reason, &nr_succeeded2);
++	
++	/*
++	 * Put the permanent failure page back to migration list, they
++	 * will be put back to the right list by the caller.
++	 */
++	list_splice(&ret_pages, from);
++
++	count_vm_events(PGMIGRATE_SUCCESS, *nr_succeeded);
++	count_vm_events(PGMIGRATE_FAIL, nr_failed);
++	count_vm_events(THP_MIGRATION_SUCCESS, nr_thp_succeeded);
++	count_vm_events(THP_MIGRATION_FAIL, nr_thp_failed);
++	trace_mm_migrate_pages(*nr_succeeded, nr_failed, nr_thp_succeeded,
++			       nr_thp_failed, 0, mode, reason, "migrate_pages_concur");
++	*nr_succeeded += nr_succeeded2;
++
++	if (item_list_order >= MAX_ORDER) {
++		free_pages_exact(item_list, total_num_pages *
++			sizeof(struct page_migration_work_item));
++	} else {
++		free_pages((unsigned long)item_list, item_list_order);
++	}
++
++	if (!swapwrite)
++		current->flags &= ~PF_SWAPWRITE;
++
++#ifdef CONFIG_PAGE_MIGRATION_PROFILE
++	timestamp = rdtsc();
++	current->move_pages_breakdown.migrate_pages_cleanup_cycles += timestamp -
++		current->move_pages_breakdown.last_timestamp;
++	current->move_pages_breakdown.last_timestamp = timestamp;
++#endif
++
++	return rc;
++}
++
+ struct page *alloc_migration_target(struct page *page, unsigned long private)
+ {
+ 	struct migration_target_control *mtc;
+@@ -4799,7 +5543,7 @@ int demotion_migrate_pages(struct list_head *from, new_page_t get_new_page,
+ 	count_vm_events(THP_MIGRATION_FAIL, nr_thp_failed);
+ 	count_vm_events(THP_MIGRATION_SPLIT, nr_thp_split);
+ 	trace_mm_migrate_pages(*nr_succeeded, nr_failed, nr_thp_succeeded,
+-			       nr_thp_failed, nr_thp_split, mode, reason);
++			       nr_thp_failed, nr_thp_split, mode, reason, "demotion_migrate_pages");
+ 
+ 	if (!swapwrite)
+ 		current->flags &= ~PF_SWAPWRITE;
+-- 
+2.43.5
+
